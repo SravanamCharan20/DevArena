@@ -44,13 +44,19 @@ const Navbar = () => {
       "
     >
       <div className="px-6 py-3 flex items-center justify-between text-white">
-
         {/* Logo */}
         <Link href="/" className="flex items-center gap-3 group">
           <span className="text-xl transition group-hover:scale-110">⚔️</span>
           <span className="text-lg font-semibold tracking-wide">
             Code<span className="text-green-400">Clash</span>
           </span>
+        </Link>
+
+        <Link
+          href="/dashboard"
+          className="text-sm text-gray-300 hover:text-white transition"
+        >
+          Dashboard
         </Link>
 
         {/* Right Section */}
@@ -76,9 +82,7 @@ const Navbar = () => {
           <div className="flex items-center gap-4">
             <span className="text-sm text-gray-300">
               Hi,{" "}
-              <span className="text-white font-medium">
-                {user.username}
-              </span>
+              <span className="text-white font-medium">{user.username}</span>
             </span>
 
             <button
