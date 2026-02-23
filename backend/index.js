@@ -6,6 +6,7 @@ import authRouter from "./routes/authRoutes.js";
 import cors from "cors";
 import http from "http";
 import { Server } from "socket.io";
+import { initSocket } from "./sockets/index.js";
 
 dotenv.config();
 const PORT = process.env.PORT || 8888;
@@ -20,9 +21,7 @@ const io = new Server(server, {
   },
 });
 
-io.on("connection",(socket) => {
-  console.log(socket.id);
-})
+initSocket(io);
 
 app.use(express.json());
 app.use(cookieParser());
