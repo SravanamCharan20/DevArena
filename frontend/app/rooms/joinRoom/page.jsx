@@ -15,10 +15,16 @@ const JoinRoomPage = () => {
       return;
     }
 
+    const normalizedRoomCode = roomCode.trim().toUpperCase();
+    if (!normalizedRoomCode) {
+      setError("Room code is required");
+      return;
+    }
+
     setError("");
     socket.emit(
       "join-room",
-      { roomCode },
+      { roomCode: normalizedRoomCode },
       (ack) => {
         if (!ack?.ok) {
           setError(ack?.message || "Could not join room");

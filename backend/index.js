@@ -6,7 +6,13 @@ import authRouter from "./routes/authRoutes.js";
 import cors from "cors";
 import http from "http";
 import { Server } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import { initSocket } from "./sockets/index.js";
+import {
+  connectRedis,
+  redisClient,
+  createRedisPubSubClients,
+} from "./config/redis.js";
 
 dotenv.config();
 const PORT = process.env.PORT || 8888;
@@ -20,8 +26,6 @@ const io = new Server(server, {
     credentials: true,
   },
 });
-
-initSocket(io);
 
 app.use(express.json());
 app.use(cookieParser());
@@ -39,9 +43,22 @@ app.get("/", (req, res) => {
 
 app.use("/auth", authRouter);
 
-connectDB().then(() => {
+const startServer = async () => {
+  await connectDB();
   console.log("Connected to DB...");
+
+  await connectRedis();
+  const { pubClient, subClient } = await createRedisPubSubClients();
+  io.adapter(createAdapter(pubClient, subClient));
+
+  initSocket(io, redisClient);
+
   server.listen(PORT, () => {
     console.log(`Server is running at ${PORT}...`);
   });
+};
+
+startServer().catch((error) => {
+  console.error("Startup error:", error.message);
+  process.exit(1);
 });

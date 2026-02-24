@@ -1,15 +1,29 @@
 "use client";
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useSocket } from "../../utils/SocketProvider";
+import { useUser } from "../../utils/UserContext";
 
 const CreateRoomPage = () => {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { socket, connected } = useSocket();
+  const { user, loading: userLoading } = useUser();
   const router = useRouter();
 
+  useEffect(() => {
+    if (userLoading || !user) return;
+    if (user.role !== "admin") {
+      router.replace("/dashboard");
+    }
+  }, [userLoading, user, router]);
+
   const handleSet = () => {
+    if (!user || user.role !== "admin") {
+      setError("Only admin can create rooms");
+      return;
+    }
+
     if (!connected) {
       setError("Socket not connected yet");
       return;
@@ -34,6 +48,9 @@ const CreateRoomPage = () => {
       router.push(`/lobby?room=${nextRoomCode}`);
     });
   };
+
+  if (userLoading || !user) return null;
+  if (user.role !== "admin") return null;
 
   return (
     <div className="min-h-[40vh] flex items-center justify-center">

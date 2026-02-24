@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 
-const rooms = new Map();
+const ROOM_TTL_SECONDS = 60 * 60 * 6;
 
 // response shapes
 const ok = (data) => ({ ok: true, data });
@@ -18,10 +18,6 @@ const normalizeRoomCode = (value) =>
     .trim()
     .toUpperCase();
 
-const emitRoomMembers = (io, roomCode, members) => {
-  io.to(roomCode).emit("room-members-updated", { roomCode, members });
-};
-
 const getCookieValue = (cookieHeader = "", key) => {
   const part = cookieHeader
     .split(";")
@@ -31,19 +27,40 @@ const getCookieValue = (cookieHeader = "", key) => {
   return decodeURIComponent(part.slice(key.length + 1));
 };
 
-const isMember = (room, userId) =>
-  room.members.some((m) => m.userId === userId);
+const roomMetaKey = (roomCode) => `room:${roomCode}:meta`;
+const roomMembersKey = (roomCode) => `room:${roomCode}:members`;
+const roomUserSocketsKey = (roomCode, userId) =>
+  `room:${roomCode}:user:${userId}:sockets`;
+const socketRoomsKey = (socketId) => `socket:${socketId}:rooms`;
 
 const toMember = (socket) => ({
   userId: socket.data.user.id,
   username: socket.data.user.username,
-  socketId: socket.id,
 });
 
-const isRoomAuthorized = (room, userId) =>
-  room.hostUserId === userId || isMember(room, userId);
+const getRoomMeta = async (redis, roomCode) => {
+  const raw = await redis.get(roomMetaKey(roomCode));
+  return raw ? JSON.parse(raw) : null;
+};
 
-export const initSocket = (io) => {
+const getRoomMembers = async (redis, roomCode) => {
+  const map = await redis.hGetAll(roomMembersKey(roomCode));
+  return Object.values(map).map((value) => JSON.parse(value));
+};
+
+const isMember = (members, userId) =>
+  members.some((member) => member.userId === userId);
+
+const isRoomAuthorized = (roomMeta, members, userId) =>
+  roomMeta.hostUserId === userId || isMember(members, userId);
+
+const emitRoomMembers = async (io, redis, roomCode) => {
+  const members = await getRoomMembers(redis, roomCode);
+  io.to(roomCode).emit("room-members-updated", { roomCode, members });
+  return members;
+};
+
+export const initSocket = (io, redis) => {
   io.use(async (socket, next) => {
     try {
       const token = getCookieValue(socket.handshake.headers.cookie || "", "token");
@@ -68,121 +85,235 @@ export const initSocket = (io) => {
   io.on("connection", (socket) => {
     console.log(`[socket:connect] ${socket.id}`);
 
-    socket.on("create-room", (_payload, ack) => {
-      if (socket.data.user?.role !== "admin") {
-        return typeof ack === "function"
-          ? ack(fail("FORBIDDEN", "Only admin can create room"))
-          : undefined;
-      }
-
-      const roomCode = generateRoomCode();
-      const hostName = getSocketName(socket);
-      const hostMember = toMember(socket);
-      const members = [hostMember];
-
-      rooms.set(roomCode, {
-        roomCode,
-        hostUserId: socket.data.user.id,
-        hostName,
-        members,
-        createdAt: new Date().toISOString(),
-      });
-
-      socket.join(roomCode);
-      emitRoomMembers(io, roomCode, members);
-
-      return typeof ack === "function"
-        ? ack(ok({ roomCode, hostName, members }))
-        : undefined;
-    });
-
-    socket.on("join-room", (payload = {}, ack) => {
-      const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
-      if (!normalizedCode) {
-        return typeof ack === "function"
-          ? ack(fail("BAD_REQUEST", "Room code is required"))
-          : undefined;
-      }
-
-      const room = rooms.get(normalizedCode);
-      if (!room) {
-        return typeof ack === "function"
-          ? ack(fail("NOT_FOUND", "Room not found"))
-          : undefined;
-      }
-
-      const userId = socket.data.user.id;
-      const memberIndex = room.members.findIndex((m) => m.userId === userId);
-
-      if (memberIndex === -1) {
-        room.members.push(toMember(socket));
-      } else {
-        room.members[memberIndex] = {
-          ...room.members[memberIndex],
-          username: socket.data.user.username,
-          socketId: socket.id,
-        };
-      }
-
-      rooms.set(normalizedCode, room);
-      socket.join(normalizedCode);
-      emitRoomMembers(io, normalizedCode, room.members);
-
-      return typeof ack === "function"
-        ? ack(ok({ roomCode: normalizedCode, members: room.members }))
-        : undefined;
-    });
-
-    socket.on("get-room-members", (payload = {}, ack) => {
-      const normalizedCode = normalizeRoomCode(payload.roomCode);
-      if (!normalizedCode) {
-        return typeof ack === "function"
-          ? ack(fail("BAD_REQUEST", "Room code is required"))
-          : undefined;
-      }
-
-      const room = rooms.get(normalizedCode);
-      if (!room) {
-        return typeof ack === "function"
-          ? ack(fail("NOT_FOUND", "Room not found"))
-          : undefined;
-      }
-
-      const requesterId = socket.data.user.id;
-      if (!isRoomAuthorized(room, requesterId)) {
-        return typeof ack === "function"
-          ? ack(fail("FORBIDDEN", "Not in room"))
-          : undefined;
-      }
-
-      return typeof ack === "function"
-        ? ack(ok({ roomCode: normalizedCode, members: room.members }))
-        : undefined;
-    });
-
-    socket.on("disconnect", (reason) => {
-      const socketName = getSocketName(socket);
-      const userId = socket.data?.user?.id;
-
-      for (const [roomCode, room] of rooms.entries()) {
-        const nextMembers = userId
-          ? room.members.filter((member) => member.userId !== userId)
-          : room.members.filter((member) => member.socketId !== socket.id);
-
-        if (nextMembers.length === 0) {
-          rooms.delete(roomCode);
-          continue;
+    socket.on("create-room", async (_payload, ack) => {
+      try {
+        if (socket.data.user?.role !== "admin") {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Only admin can create room"))
+            : undefined;
         }
 
-        if (nextMembers.length === room.members.length) {
-          continue;
+        let roomCode = generateRoomCode();
+        while (await redis.exists(roomMetaKey(roomCode))) {
+          roomCode = generateRoomCode();
         }
 
-        rooms.set(roomCode, { ...room, members: nextMembers });
-        emitRoomMembers(io, roomCode, nextMembers);
-      }
+        const hostName = getSocketName(socket);
+        const hostMember = toMember(socket);
 
-      console.log(`[socket:disconnect] ${socketName} (${socket.id}) ${reason}`);
+        const multi = redis.multi();
+        multi.set(
+          roomMetaKey(roomCode),
+          JSON.stringify({
+            roomCode,
+            hostUserId: socket.data.user.id,
+            hostName,
+            createdAt: new Date().toISOString(),
+          }),
+          {
+            EX: ROOM_TTL_SECONDS,
+          }
+        );
+        multi.hSet(
+          roomMembersKey(roomCode),
+          hostMember.userId,
+          JSON.stringify(hostMember)
+        );
+        multi.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
+        multi.sAdd(roomUserSocketsKey(roomCode, hostMember.userId), socket.id);
+        multi.expire(
+          roomUserSocketsKey(roomCode, hostMember.userId),
+          ROOM_TTL_SECONDS
+        );
+        multi.sAdd(socketRoomsKey(socket.id), roomCode);
+        multi.expire(socketRoomsKey(socket.id), ROOM_TTL_SECONDS);
+        await multi.exec();
+
+        socket.join(roomCode);
+        const members = await emitRoomMembers(io, redis, roomCode);
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode, hostName, members }))
+          : undefined;
+      } catch (error) {
+        console.error("create-room error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not create room"))
+          : undefined;
+      }
+    });
+
+    socket.on("join-room", async (payload = {}, ack) => {
+      try {
+        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!normalizedCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        const member = toMember(socket);
+
+        const multi = redis.multi();
+        multi.hSet(
+          roomMembersKey(normalizedCode),
+          member.userId,
+          JSON.stringify(member)
+        );
+        multi.expire(roomMembersKey(normalizedCode), ROOM_TTL_SECONDS);
+        multi.sAdd(roomUserSocketsKey(normalizedCode, member.userId), socket.id);
+        multi.expire(
+          roomUserSocketsKey(normalizedCode, member.userId),
+          ROOM_TTL_SECONDS
+        );
+        multi.sAdd(socketRoomsKey(socket.id), normalizedCode);
+        multi.expire(socketRoomsKey(socket.id), ROOM_TTL_SECONDS);
+        multi.expire(roomMetaKey(normalizedCode), ROOM_TTL_SECONDS);
+        await multi.exec();
+
+        socket.join(normalizedCode);
+        const members = await emitRoomMembers(io, redis, normalizedCode);
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode: normalizedCode, members }))
+          : undefined;
+      } catch (error) {
+        console.error("join-room error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not join room"))
+          : undefined;
+      }
+    });
+
+    socket.on("get-room-members", async (payload = {}, ack) => {
+      try {
+        const normalizedCode = normalizeRoomCode(payload.roomCode);
+        if (!normalizedCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        const members = await getRoomMembers(redis, normalizedCode);
+        const requesterId = socket.data.user.id;
+        if (!isRoomAuthorized(roomMeta, members, requesterId)) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Not in room"))
+            : undefined;
+        }
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode: normalizedCode, members }))
+          : undefined;
+      } catch (error) {
+        console.error("get-room-members error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not load members"))
+          : undefined;
+      }
+    });
+
+    socket.on("leave-room", async (payload = {}, ack) => {
+      try {
+        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!normalizedCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        const userId = socket.data.user.id;
+        const userSocketKey = roomUserSocketsKey(normalizedCode, userId);
+
+        await redis.sRem(userSocketKey, socket.id);
+        const remainingSockets = await redis.sCard(userSocketKey);
+
+        if (remainingSockets === 0) {
+          await redis.hDel(roomMembersKey(normalizedCode), userId);
+          await redis.del(userSocketKey);
+        } else {
+          await redis.expire(userSocketKey, ROOM_TTL_SECONDS);
+        }
+
+        await redis.sRem(socketRoomsKey(socket.id), normalizedCode);
+        socket.leave(normalizedCode);
+
+        const members = await getRoomMembers(redis, normalizedCode);
+        await redis.expire(roomMetaKey(normalizedCode), ROOM_TTL_SECONDS);
+        await redis.expire(roomMembersKey(normalizedCode), ROOM_TTL_SECONDS);
+        io.to(normalizedCode).emit("room-members-updated", {
+          roomCode: normalizedCode,
+          members,
+        });
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode: normalizedCode, members }))
+          : undefined;
+      } catch (error) {
+        console.error("leave-room error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not leave room"))
+          : undefined;
+      }
+    });
+
+    socket.on("disconnect", async (reason) => {
+      try {
+        const socketName = getSocketName(socket);
+        const userId = socket.data?.user?.id;
+        if (!userId) {
+          console.log(`[socket:disconnect] ${socketName} (${socket.id}) ${reason}`);
+          return;
+        }
+
+        const roomCodes = await redis.sMembers(socketRoomsKey(socket.id));
+
+        for (const roomCode of roomCodes) {
+          const userSocketKey = roomUserSocketsKey(roomCode, userId);
+          await redis.sRem(userSocketKey, socket.id);
+
+          const remainingSockets = await redis.sCard(userSocketKey);
+          if (remainingSockets === 0) {
+            await redis.hDel(roomMembersKey(roomCode), userId);
+            await redis.del(userSocketKey);
+          } else {
+            await redis.expire(userSocketKey, ROOM_TTL_SECONDS);
+          }
+
+          const members = await getRoomMembers(redis, roomCode);
+          await redis.expire(roomMetaKey(roomCode), ROOM_TTL_SECONDS);
+          if (members.length > 0) {
+            await redis.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
+          }
+          io.to(roomCode).emit("room-members-updated", { roomCode, members });
+        }
+
+        await redis.del(socketRoomsKey(socket.id));
+        console.log(`[socket:disconnect] ${socketName} (${socket.id}) ${reason}`);
+      } catch (error) {
+        console.error("disconnect cleanup error:", error.message);
+      }
     });
   });
 };
