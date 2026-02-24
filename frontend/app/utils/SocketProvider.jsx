@@ -8,36 +8,35 @@ const SocketContext = createContext(null);
 export function SocketProvider({ children }) {
   const { user } = useUser();
   const [connected, setConnected] = useState(socket.connected);
-  const [socketName, setSocketName] = useState("");
 
   useEffect(() => {
     const onConnect = () => setConnected(true);
     const onDisconnect = () => setConnected(false);
+    const onConnectError = () => setConnected(false);
 
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
-
-    if (!socket.connected) socket.connect();
+    socket.on("connect_error", onConnectError);
 
     return () => {
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
+      socket.off("connect_error", onConnectError);
     };
   }, []);
 
   useEffect(() => {
-    if (!connected || !user?.username) return;
+    if (user && !socket.connected) {
+      socket.connect();
+      return;
+    }
 
-    socket.emit("register-user", { username: user.username }, (ack) => {
-      if (!ack?.ok) return;
-      setSocketName(ack.username);
-    });
-  }, [connected, user?.username]);
+    if (!user && socket.connected) {
+      socket.disconnect();
+    }
+  }, [user]);
 
-  const value = useMemo(
-    () => ({ socket, connected, socketName }),
-    [connected, socketName]
-  );
+  const value = useMemo(() => ({ socket, connected }), [connected]);
 
   return <SocketContext.Provider value={value}>{children}</SocketContext.Provider>;
 }
