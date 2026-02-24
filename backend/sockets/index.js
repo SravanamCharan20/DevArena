@@ -3,8 +3,8 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 
 const ROOM_TTL_SECONDS = 60 * 60 * 6;
+const CONTEST_COUNTDOWN_MS = 3000;
 
-// response shapes
 const ok = (data) => ({ ok: true, data });
 const fail = (code, message) => ({ ok: false, code, message });
 
@@ -33,9 +33,10 @@ const roomUserSocketsKey = (roomCode, userId) =>
   `room:${roomCode}:user:${userId}:sockets`;
 const socketRoomsKey = (socketId) => `socket:${socketId}:rooms`;
 
-const toMember = (socket) => ({
+const toMember = (socket, ready = false) => ({
   userId: socket.data.user.id,
   username: socket.data.user.username,
+  ready,
 });
 
 const getRoomMeta = async (redis, roomCode) => {
@@ -48,16 +49,35 @@ const getRoomMembers = async (redis, roomCode) => {
   return Object.values(map).map((value) => JSON.parse(value));
 };
 
+const setRoomMeta = async (redis, roomCode, roomMeta) => {
+  await redis.set(roomMetaKey(roomCode), JSON.stringify(roomMeta), {
+    EX: ROOM_TTL_SECONDS,
+  });
+};
+
+const refreshRoomTtls = async (redis, roomCode, hasMembers) => {
+  const multi = redis.multi();
+  multi.expire(roomMetaKey(roomCode), ROOM_TTL_SECONDS);
+  if (hasMembers) {
+    multi.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
+  }
+  await multi.exec();
+};
+
 const isMember = (members, userId) =>
   members.some((member) => member.userId === userId);
 
 const isRoomAuthorized = (roomMeta, members, userId) =>
   roomMeta.hostUserId === userId || isMember(members, userId);
 
+const computeAllReady = (members) =>
+  members.length > 0 && members.every((member) => member.ready === true);
+
 const emitRoomMembers = async (io, redis, roomCode) => {
   const members = await getRoomMembers(redis, roomCode);
-  io.to(roomCode).emit("room-members-updated", { roomCode, members });
-  return members;
+  const allReady = computeAllReady(members);
+  io.to(roomCode).emit("room-members-updated", { roomCode, members, allReady });
+  return { members, allReady };
 };
 
 const deleteRoomState = async (redis, roomCode, members) => {
@@ -118,21 +138,20 @@ export const initSocket = (io, redis) => {
         }
 
         const hostName = getSocketName(socket);
-        const hostMember = toMember(socket);
+        const hostMember = toMember(socket, false);
+        const roomMeta = {
+          roomCode,
+          hostUserId: socket.data.user.id,
+          hostName,
+          status: "lobby",
+          contestStartAt: null,
+          createdAt: new Date().toISOString(),
+        };
 
         const multi = redis.multi();
-        multi.set(
-          roomMetaKey(roomCode),
-          JSON.stringify({
-            roomCode,
-            hostUserId: socket.data.user.id,
-            hostName,
-            createdAt: new Date().toISOString(),
-          }),
-          {
-            EX: ROOM_TTL_SECONDS,
-          }
-        );
+        multi.set(roomMetaKey(roomCode), JSON.stringify(roomMeta), {
+          EX: ROOM_TTL_SECONDS,
+        });
         multi.hSet(
           roomMembersKey(roomCode),
           hostMember.userId,
@@ -149,15 +168,18 @@ export const initSocket = (io, redis) => {
         await multi.exec();
 
         socket.join(roomCode);
-        const members = await emitRoomMembers(io, redis, roomCode);
+        const { members, allReady } = await emitRoomMembers(io, redis, roomCode);
 
         return typeof ack === "function"
           ? ack(
               ok({
                 roomCode,
                 hostName,
-                hostUserId: socket.data.user.id,
+                hostUserId: roomMeta.hostUserId,
+                status: roomMeta.status,
+                contestStartAt: roomMeta.contestStartAt,
                 members,
+                allReady,
               })
             )
           : undefined;
@@ -171,50 +193,60 @@ export const initSocket = (io, redis) => {
 
     socket.on("join-room", async (payload = {}, ack) => {
       try {
-        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
-        if (!normalizedCode) {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
           return typeof ack === "function"
             ? ack(fail("BAD_REQUEST", "Room code is required"))
             : undefined;
         }
 
-        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        const roomMeta = await getRoomMeta(redis, roomCode);
         if (!roomMeta) {
           return typeof ack === "function"
             ? ack(fail("NOT_FOUND", "Room not found"))
             : undefined;
         }
 
-        const member = toMember(socket);
+        const existingMembers = await getRoomMembers(redis, roomCode);
+        const userId = socket.data.user.id;
+        const existingMember = existingMembers.find((m) => m.userId === userId);
+
+        if (roomMeta.status === "running" && !existingMember) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Contest already started"))
+            : undefined;
+        }
+
+        const memberToStore = existingMember
+          ? {
+              ...existingMember,
+              username: socket.data.user.username,
+            }
+          : toMember(socket, false);
 
         const multi = redis.multi();
-        multi.hSet(
-          roomMembersKey(normalizedCode),
-          member.userId,
-          JSON.stringify(member)
-        );
-        multi.expire(roomMembersKey(normalizedCode), ROOM_TTL_SECONDS);
-        multi.sAdd(roomUserSocketsKey(normalizedCode, member.userId), socket.id);
-        multi.expire(
-          roomUserSocketsKey(normalizedCode, member.userId),
-          ROOM_TTL_SECONDS
-        );
-        multi.sAdd(socketRoomsKey(socket.id), normalizedCode);
+        multi.hSet(roomMembersKey(roomCode), userId, JSON.stringify(memberToStore));
+        multi.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
+        multi.sAdd(roomUserSocketsKey(roomCode, userId), socket.id);
+        multi.expire(roomUserSocketsKey(roomCode, userId), ROOM_TTL_SECONDS);
+        multi.sAdd(socketRoomsKey(socket.id), roomCode);
         multi.expire(socketRoomsKey(socket.id), ROOM_TTL_SECONDS);
-        multi.expire(roomMetaKey(normalizedCode), ROOM_TTL_SECONDS);
+        multi.expire(roomMetaKey(roomCode), ROOM_TTL_SECONDS);
         await multi.exec();
 
-        socket.join(normalizedCode);
-        const members = await emitRoomMembers(io, redis, normalizedCode);
+        socket.join(roomCode);
+        const { members, allReady } = await emitRoomMembers(io, redis, roomCode);
 
-        const roomMetaAfterJoin = await getRoomMeta(redis, normalizedCode);
         return typeof ack === "function"
           ? ack(
               ok({
-                roomCode: normalizedCode,
-                hostName: roomMetaAfterJoin?.hostName || "",
-                hostUserId: roomMetaAfterJoin?.hostUserId || "",
+                roomCode,
+                hostName: roomMeta.hostName,
+                hostUserId: roomMeta.hostUserId,
+                status: roomMeta.status,
+                contestStartAt: roomMeta.contestStartAt || null,
                 members,
+                allReady,
               })
             )
           : undefined;
@@ -228,21 +260,21 @@ export const initSocket = (io, redis) => {
 
     socket.on("get-room-members", async (payload = {}, ack) => {
       try {
-        const normalizedCode = normalizeRoomCode(payload.roomCode);
-        if (!normalizedCode) {
+        const roomCode = normalizeRoomCode(payload.roomCode);
+        if (!roomCode) {
           return typeof ack === "function"
             ? ack(fail("BAD_REQUEST", "Room code is required"))
             : undefined;
         }
 
-        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        const roomMeta = await getRoomMeta(redis, roomCode);
         if (!roomMeta) {
           return typeof ack === "function"
             ? ack(fail("NOT_FOUND", "Room not found"))
             : undefined;
         }
 
-        const members = await getRoomMembers(redis, normalizedCode);
+        const members = await getRoomMembers(redis, roomCode);
         const requesterId = socket.data.user.id;
         if (!isRoomAuthorized(roomMeta, members, requesterId)) {
           return typeof ack === "function"
@@ -253,10 +285,13 @@ export const initSocket = (io, redis) => {
         return typeof ack === "function"
           ? ack(
               ok({
-                roomCode: normalizedCode,
+                roomCode,
                 hostName: roomMeta.hostName,
                 hostUserId: roomMeta.hostUserId,
+                status: roomMeta.status,
+                contestStartAt: roomMeta.contestStartAt || null,
                 members,
+                allReady: computeAllReady(members),
               })
             )
           : undefined;
@@ -268,16 +303,134 @@ export const initSocket = (io, redis) => {
       }
     });
 
-    socket.on("leave-room", async (payload = {}, ack) => {
+    socket.on("set-ready", async (payload = {}, ack) => {
       try {
-        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
-        if (!normalizedCode) {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
           return typeof ack === "function"
             ? ack(fail("BAD_REQUEST", "Room code is required"))
             : undefined;
         }
 
-        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        const roomMeta = await getRoomMeta(redis, roomCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        if (roomMeta.status !== "lobby") {
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest already started"))
+            : undefined;
+        }
+
+        const userId = socket.data.user.id;
+        const memberRaw = await redis.hGet(roomMembersKey(roomCode), userId);
+        if (!memberRaw) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Not in room"))
+            : undefined;
+        }
+
+        const member = JSON.parse(memberRaw);
+        const nextReady =
+          typeof payload.ready === "boolean" ? payload.ready : !member.ready;
+
+        const nextMember = {
+          ...member,
+          username: socket.data.user.username,
+          ready: nextReady,
+        };
+
+        const multi = redis.multi();
+        multi.hSet(roomMembersKey(roomCode), userId, JSON.stringify(nextMember));
+        multi.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
+        multi.expire(roomMetaKey(roomCode), ROOM_TTL_SECONDS);
+        await multi.exec();
+
+        const { members, allReady } = await emitRoomMembers(io, redis, roomCode);
+        return typeof ack === "function"
+          ? ack(ok({ roomCode, members, allReady }))
+          : undefined;
+      } catch (error) {
+        console.error("set-ready error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not update ready state"))
+          : undefined;
+      }
+    });
+
+    socket.on("start-contest", async (payload = {}, ack) => {
+      try {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, roomCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        if (roomMeta.hostUserId !== socket.data.user.id) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Only host can start contest"))
+            : undefined;
+        }
+
+        if (roomMeta.status !== "lobby") {
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest already started"))
+            : undefined;
+        }
+
+        const members = await getRoomMembers(redis, roomCode);
+        const allReady = computeAllReady(members);
+        if (!allReady) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "All members must be ready"))
+            : undefined;
+        }
+
+        const contestStartAt = Date.now() + CONTEST_COUNTDOWN_MS;
+        const nextMeta = {
+          ...roomMeta,
+          status: "running",
+          contestStartAt,
+        };
+        await setRoomMeta(redis, roomCode, nextMeta);
+
+        io.to(roomCode).emit("contest-starting", {
+          roomCode,
+          contestStartAt,
+        });
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode, contestStartAt, status: "running" }))
+          : undefined;
+      } catch (error) {
+        console.error("start-contest error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not start contest"))
+          : undefined;
+      }
+    });
+
+    socket.on("leave-room", async (payload = {}, ack) => {
+      try {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, roomCode);
         if (!roomMeta) {
           return typeof ack === "function"
             ? ack(fail("NOT_FOUND", "Room not found"))
@@ -285,31 +438,26 @@ export const initSocket = (io, redis) => {
         }
 
         const userId = socket.data.user.id;
-        const userSocketKey = roomUserSocketsKey(normalizedCode, userId);
+        const userSocketKey = roomUserSocketsKey(roomCode, userId);
 
         await redis.sRem(userSocketKey, socket.id);
         const remainingSockets = await redis.sCard(userSocketKey);
 
         if (remainingSockets === 0) {
-          await redis.hDel(roomMembersKey(normalizedCode), userId);
+          await redis.hDel(roomMembersKey(roomCode), userId);
           await redis.del(userSocketKey);
         } else {
           await redis.expire(userSocketKey, ROOM_TTL_SECONDS);
         }
 
-        await redis.sRem(socketRoomsKey(socket.id), normalizedCode);
-        socket.leave(normalizedCode);
+        await redis.sRem(socketRoomsKey(socket.id), roomCode);
+        socket.leave(roomCode);
 
-        const members = await getRoomMembers(redis, normalizedCode);
-        await redis.expire(roomMetaKey(normalizedCode), ROOM_TTL_SECONDS);
-        await redis.expire(roomMembersKey(normalizedCode), ROOM_TTL_SECONDS);
-        io.to(normalizedCode).emit("room-members-updated", {
-          roomCode: normalizedCode,
-          members,
-        });
+        const { members, allReady } = await emitRoomMembers(io, redis, roomCode);
+        await refreshRoomTtls(redis, roomCode, members.length > 0);
 
         return typeof ack === "function"
-          ? ack(ok({ roomCode: normalizedCode, members }))
+          ? ack(ok({ roomCode, members, allReady }))
           : undefined;
       } catch (error) {
         console.error("leave-room error:", error.message);
@@ -321,38 +469,37 @@ export const initSocket = (io, redis) => {
 
     socket.on("close-room", async (payload = {}, ack) => {
       try {
-        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
-        if (!normalizedCode) {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
           return typeof ack === "function"
             ? ack(fail("BAD_REQUEST", "Room code is required"))
             : undefined;
         }
 
-        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        const roomMeta = await getRoomMeta(redis, roomCode);
         if (!roomMeta) {
           return typeof ack === "function"
             ? ack(fail("NOT_FOUND", "Room not found"))
             : undefined;
         }
 
-        const requesterId = socket.data.user.id;
-        if (roomMeta.hostUserId !== requesterId) {
+        if (roomMeta.hostUserId !== socket.data.user.id) {
           return typeof ack === "function"
             ? ack(fail("FORBIDDEN", "Only host can close room"))
             : undefined;
         }
 
-        const members = await getRoomMembers(redis, normalizedCode);
-        io.to(normalizedCode).emit("room-closed", {
-          roomCode: normalizedCode,
+        const members = await getRoomMembers(redis, roomCode);
+        io.to(roomCode).emit("room-closed", {
+          roomCode,
           message: "Room closed by host",
         });
-        io.in(normalizedCode).socketsLeave(normalizedCode);
+        io.in(roomCode).socketsLeave(roomCode);
 
-        await deleteRoomState(redis, normalizedCode, members);
+        await deleteRoomState(redis, roomCode, members);
 
         return typeof ack === "function"
-          ? ack(ok({ roomCode: normalizedCode }))
+          ? ack(ok({ roomCode }))
           : undefined;
       } catch (error) {
         console.error("close-room error:", error.message);
@@ -385,12 +532,11 @@ export const initSocket = (io, redis) => {
             await redis.expire(userSocketKey, ROOM_TTL_SECONDS);
           }
 
-          const members = await getRoomMembers(redis, roomCode);
-          await redis.expire(roomMetaKey(roomCode), ROOM_TTL_SECONDS);
-          if (members.length > 0) {
-            await redis.expire(roomMembersKey(roomCode), ROOM_TTL_SECONDS);
-          }
-          io.to(roomCode).emit("room-members-updated", { roomCode, members });
+          const roomMeta = await getRoomMeta(redis, roomCode);
+          if (!roomMeta) continue;
+
+          const { members } = await emitRoomMembers(io, redis, roomCode);
+          await refreshRoomTtls(redis, roomCode, members.length > 0);
         }
 
         await redis.del(socketRoomsKey(socket.id));
