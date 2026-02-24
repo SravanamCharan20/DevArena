@@ -2,6 +2,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { API_BASE_URL } from "../../utils/config";
 
 export default function Signup() {
   const [username, setUsername] = useState("");
@@ -17,7 +18,7 @@ export default function Signup() {
     setSuccess("");
 
     try {
-      const res = await fetch("http://localhost:8888/auth/signup", {
+      const res = await fetch(`${API_BASE_URL}/auth/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, email, password }),

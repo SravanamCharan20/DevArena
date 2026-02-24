@@ -3,34 +3,34 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useUser } from "../../utils/UserContext";
-
+import { API_BASE_URL } from "../../utils/config";
 
 export default function Signin() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const { user, setUser, loading } = useUser();
+  const { setUser } = useUser();
 
   const router = useRouter();
 
   const handleSignin = async () => {
     setError("");
     try {
-      const res = await fetch("http://localhost:8888/auth/signin", {
+      const res = await fetch(`${API_BASE_URL}/auth/signin`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      
+
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Signin failed");
 
       setUser(data.user);
       setSuccess("Welcome back! Let’s get coding ⚡");
 
-      router.push("/");
+      router.push("/dashboard");
     } catch (err) {
       setError(err.message);
     }

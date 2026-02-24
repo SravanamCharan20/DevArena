@@ -3,6 +3,7 @@ import { connectDB } from "./config/db.js";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import authRouter from "./routes/authRoutes.js";
+import contestRouter from "./routes/contestRoutes.js";
 import cors from "cors";
 import http from "http";
 import { Server } from "socket.io";
@@ -16,12 +17,23 @@ import {
 
 dotenv.config();
 const PORT = process.env.PORT || 8888;
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:3000";
 const app = express();
 const server = http.createServer(app);
 
+if (process.env.TRUST_PROXY) {
+  const trustProxyValue =
+    process.env.TRUST_PROXY === "true"
+      ? 1
+      : Number.isNaN(Number(process.env.TRUST_PROXY))
+        ? process.env.TRUST_PROXY
+        : Number(process.env.TRUST_PROXY);
+  app.set("trust proxy", trustProxyValue);
+}
+
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:3000",
+    origin: CLIENT_ORIGIN,
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -32,7 +44,7 @@ app.use(cookieParser());
 
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: CLIENT_ORIGIN,
     credentials: true,
   })
 );
@@ -42,6 +54,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/auth", authRouter);
+app.use("/contest", contestRouter);
 
 const startServer = async () => {
   await connectDB();

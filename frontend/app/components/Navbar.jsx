@@ -3,21 +3,33 @@ import React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useUser } from "../utils/UserContext";
+import { useSocket } from "../utils/SocketProvider";
+import { API_BASE_URL } from "../utils/config";
 
 const Navbar = () => {
-  const { user, setUser, loading } = useUser();
+  const { user, setUser, loading, activeRoom, refreshActiveRoom } = useUser();
+  const { socket, connected } = useSocket();
   const router = useRouter();
 
   const handleLogout = async () => {
     try {
-      await fetch("http://localhost:8888/auth/logout", {
+      if (activeRoom?.roomCode && connected) {
+        await new Promise((resolve) => {
+          socket.emit("leave-room", { roomCode: activeRoom.roomCode }, () => {
+            resolve();
+          });
+        });
+      }
+
+      await fetch(`${API_BASE_URL}/auth/logout`, {
         method: "POST",
         credentials: "include",
       });
 
+      await refreshActiveRoom();
       setUser(null);
       router.push("/auth/signin");
-    } catch (err) {
+    } catch {
       console.error("Logout failed");
     }
   };
