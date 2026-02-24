@@ -78,7 +78,7 @@ const ArenaClient = ({ roomCode }) => {
   const handleCloseRoom = () => {
     if (!isHost) return;
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -103,7 +103,17 @@ const ArenaClient = ({ roomCode }) => {
           Room Code: <span className="font-bold">{roomCode || "N/A"}</span>
         </p>
 
-        {error && <p className="text-red-400 text-sm mt-4">{error}</p>}
+        {!connected && (
+          <p className="text-xs text-yellow-300 mt-3" role="status" aria-live="polite">
+            Reconnecting to live server...
+          </p>
+        )}
+
+        {error && (
+          <p className="text-red-400 text-sm mt-4" role="alert">
+            {error}
+          </p>
+        )}
 
         <button
           onClick={handleLeaveArena}

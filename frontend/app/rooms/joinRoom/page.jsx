@@ -6,12 +6,13 @@ import { useRouter } from "next/navigation";
 const JoinRoomPage = () => {
   const [roomCode, setRoomCode] = useState("");
   const [error, setError] = useState("");
+  const [joining, setJoining] = useState(false);
   const router = useRouter();
   const { socket, connected } = useSocket();
 
   const handleJoinRoom = () => {
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -22,10 +23,12 @@ const JoinRoomPage = () => {
     }
 
     setError("");
+    setJoining(true);
     socket.emit(
       "join-room",
       { roomCode: normalizedRoomCode },
       (ack) => {
+        setJoining(false);
         if (!ack?.ok) {
           setError(ack?.message || "Could not join room");
           return;
@@ -47,6 +50,12 @@ const JoinRoomPage = () => {
       <div className="w-full max-w-md rounded-2xl p-8 shadow-xl">
         <h2 className="text-2xl font-semibold text-center mb-6">Join Room</h2>
 
+        {!connected && (
+          <p className="text-xs text-yellow-300 mb-3" role="status" aria-live="polite">
+            Reconnecting to live server...
+          </p>
+        )}
+
         <label className="block mb-2">Enter Room Code</label>
         <input
           type="text"
@@ -58,12 +67,17 @@ const JoinRoomPage = () => {
 
         <button
           onClick={handleJoinRoom}
+          disabled={joining}
           className="w-full bg-green-600 border p-3 rounded-lg text-black cursor-pointer"
         >
-          Join
+          {joining ? "Joining..." : "Join"}
         </button>
 
-        {error && <p className="text-red-400 mt-3 text-sm">{error}</p>}
+        {error && (
+          <p className="text-red-400 mt-3 text-sm" role="alert">
+            {error}
+          </p>
+        )}
       </div>
     </div>
   );

@@ -17,12 +17,13 @@ const Dashboard = () => {
   const isAdmin = user.role === "admin";
   const hasRunningContest = activeRoom?.status === "running" && activeRoom?.roomCode;
   const hasLobbyRoom = activeRoom?.status === "lobby" && activeRoom?.roomCode;
+  const hasAnyActiveRoom = Boolean(hasRunningContest || hasLobbyRoom);
 
   const handleResume = () => {
     if (!activeRoom?.roomCode) return;
 
     if (!connected) {
-      setResumeError("Socket not connected yet");
+      setResumeError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -38,7 +39,8 @@ const Dashboard = () => {
         return;
       }
 
-      if (activeRoom.status === "running") {
+      const nextStatus = ack?.data?.status;
+      if (nextStatus === "running") {
         router.push(`/arena?room=${activeRoom.roomCode}`);
         return;
       }
@@ -53,6 +55,12 @@ const Dashboard = () => {
         <h2 className="text-2xl font-semibold text-green-400/70 text-center mb-6">
           Welcome
         </h2>
+
+        {!connected && (
+          <p className="text-xs text-yellow-300 mb-4" role="status" aria-live="polite">
+            Reconnecting to live server...
+          </p>
+        )}
 
         <div className="flex flex-col gap-4">
           {(hasRunningContest || hasLobbyRoom) && (
@@ -75,12 +83,14 @@ const Dashboard = () => {
                     : "Open Lobby"}
               </button>
               {resumeError && (
-                <p className="text-red-400 text-xs mt-2">{resumeError}</p>
+                <p className="text-red-400 text-xs mt-2" role="alert">
+                  {resumeError}
+                </p>
               )}
             </div>
           )}
 
-          {isAdmin && (
+          {!hasAnyActiveRoom && isAdmin && (
             <Link
               href="/rooms/createRoom"
               className="w-full py-3 rounded-xl cursor-pointer bg-green-400/70 hover:bg-green-600 transition-all duration-200 text-white font-medium shadow-md hover:shadow-lg active:scale-[0.98]"
@@ -89,12 +99,20 @@ const Dashboard = () => {
             </Link>
           )}
 
-          <Link
-            href="/rooms/joinRoom"
-            className="w-full text-center py-3 rounded-xl bg-indigo-500/70 hover:bg-indigo-600 transition-all duration-200 text-white font-medium shadow-md hover:shadow-lg active:scale-[0.98]"
-          >
-            Join Room
-          </Link>
+          {!hasAnyActiveRoom && (
+            <Link
+              href="/rooms/joinRoom"
+              className="w-full text-center py-3 rounded-xl bg-indigo-500/70 hover:bg-indigo-600 transition-all duration-200 text-white font-medium shadow-md hover:shadow-lg active:scale-[0.98]"
+            >
+              Join Room
+            </Link>
+          )}
+
+          {hasAnyActiveRoom && (
+            <p className="text-xs text-gray-300" role="status" aria-live="polite">
+              Leave your current room before creating or joining another one.
+            </p>
+          )}
         </div>
       </div>
     </div>

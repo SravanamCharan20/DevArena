@@ -325,6 +325,24 @@ const getPersistedParticipant = (roomDoc, userId) =>
       REJOIN_PARTICIPANT_STATES.has(participant.state || "active")
   );
 
+const findUserActiveRoom = async (userId, excludeRoomCode = null) => {
+  const query = {
+    status: { $in: ACTIVE_ROOM_STATUSES },
+    participants: {
+      $elemMatch: {
+        userId,
+        state: { $in: Array.from(REJOIN_PARTICIPANT_STATES) },
+      },
+    },
+  };
+
+  if (excludeRoomCode) {
+    query.roomCode = { $ne: excludeRoomCode };
+  }
+
+  return ContestRoom.findOne(query).select("roomCode status").lean();
+};
+
 export const initSocket = (io, redis) => {
   io.use(async (socket, next) => {
     try {
@@ -356,6 +374,21 @@ export const initSocket = (io, redis) => {
         if (socket.data.user?.role !== "admin") {
           return typeof ack === "function"
             ? ack(fail("FORBIDDEN", "Only admin can create room"))
+            : undefined;
+        }
+
+        const userId = socket.data.user.id;
+        const alreadyActiveRoom = await findUserActiveRoom(userId);
+        if (alreadyActiveRoom) {
+          const activeLabel =
+            alreadyActiveRoom.status === "running" ? "contest" : "lobby";
+          return typeof ack === "function"
+            ? ack(
+                fail(
+                  "BAD_STATE",
+                  `You are already in an active ${activeLabel} (${alreadyActiveRoom.roomCode}). Leave it first.`
+                )
+              )
             : undefined;
         }
 
@@ -467,6 +500,20 @@ export const initSocket = (io, redis) => {
         }
 
         const userId = socket.data.user.id;
+        const alreadyActiveRoom = await findUserActiveRoom(userId, roomCode);
+        if (alreadyActiveRoom) {
+          const activeLabel =
+            alreadyActiveRoom.status === "running" ? "contest" : "lobby";
+          return typeof ack === "function"
+            ? ack(
+                fail(
+                  "BAD_STATE",
+                  `You are already in an active ${activeLabel} (${alreadyActiveRoom.roomCode}). Leave it first.`
+                )
+              )
+            : undefined;
+        }
+
         const roomDoc = await ContestRoom.findOne({ roomCode })
           .select("participants")
           .lean();

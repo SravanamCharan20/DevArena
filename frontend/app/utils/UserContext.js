@@ -1,15 +1,18 @@
 "use client";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { API_BASE_URL } from "./config";
 
 const UserContext = createContext(null);
+const isPublicPath = (pathname) =>
+  pathname === "/" || pathname.startsWith("/auth");
 
 export const UserProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeRoom, setActiveRoom] = useState(null);
   const router = useRouter();
+  const pathname = usePathname();
 
   const refreshActiveRoom = useCallback(async () => {
     try {
@@ -41,7 +44,9 @@ export const UserProvider = ({ children }) => {
         });
 
         if (!res.ok) {
-          router.push("/auth/signin");
+          if (!isPublicPath(pathname)) {
+            router.replace("/auth/signin");
+          }
           throw new Error("Not authenticated");
         }
 
@@ -55,7 +60,7 @@ export const UserProvider = ({ children }) => {
     };
 
     fetchProfile();
-  }, [router]);
+  }, [pathname, router]);
 
   useEffect(() => {
     if (!user) {

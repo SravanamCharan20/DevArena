@@ -6,7 +6,7 @@ import { useUser } from "../utils/UserContext";
 
 const LobbyClient = ({ roomCode }) => {
   const { socket, connected } = useSocket();
-  const { user } = useUser();
+  const { user, refreshActiveRoom } = useUser();
   const router = useRouter();
   const [members, setMembers] = useState([]);
   const [error, setError] = useState("");
@@ -41,8 +41,9 @@ const LobbyClient = ({ roomCode }) => {
       );
     };
 
-    const handleRoomClosed = (payload = {}) => {
+    const handleRoomClosed = async (payload = {}) => {
       if (payload.roomCode !== roomCode) return;
+      await refreshActiveRoom();
       router.push("/dashboard");
     };
 
@@ -90,7 +91,7 @@ const LobbyClient = ({ roomCode }) => {
       socket.off("room-closed", handleRoomClosed);
       socket.off("contest-starting", handleContestStarting);
     };
-  }, [socket, connected, roomCode, invalidRoomCode, router]);
+  }, [socket, connected, roomCode, invalidRoomCode, router, refreshActiveRoom]);
 
   useEffect(() => {
     if (!contestStartAt) return;
@@ -119,20 +120,21 @@ const LobbyClient = ({ roomCode }) => {
     }
 
     setLeaving(true);
-    socket.emit("leave-room", { roomCode }, (ack) => {
+    socket.emit("leave-room", { roomCode }, async (ack) => {
       setLeaving(false);
       if (!ack?.ok && ack?.code !== "NOT_FOUND") {
         setError(ack?.message || "Could not leave lobby");
         return;
       }
 
+      await refreshActiveRoom();
       router.push("/dashboard");
     });
   };
 
   const handleToggleReady = () => {
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -166,7 +168,7 @@ const LobbyClient = ({ roomCode }) => {
     if (!isHost) return;
 
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -194,18 +196,19 @@ const LobbyClient = ({ roomCode }) => {
     if (!isHost) return;
 
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
     setClosing(true);
-    socket.emit("close-room", { roomCode }, (ack) => {
+    socket.emit("close-room", { roomCode }, async (ack) => {
       setClosing(false);
       if (!ack?.ok) {
         setError(ack?.message || "Could not close room");
         return;
       }
 
+      await refreshActiveRoom();
       router.push("/dashboard");
     });
   };
@@ -218,11 +221,19 @@ const LobbyClient = ({ roomCode }) => {
           Room Code: <span className="font-bold">{roomCode || "N/A"}</span>
         </p>
 
+        {!connected && (
+          <p className="text-xs text-yellow-300 mb-4" role="status" aria-live="polite">
+            Reconnecting to live server...
+          </p>
+        )}
+
         <h3 className="text-lg font-medium mb-3">Members</h3>
         {invalidRoomCode ? (
           <p className="text-red-400 text-sm">Invalid room code</p>
         ) : error ? (
-          <p className="text-red-400 text-sm">{error}</p>
+          <p className="text-red-400 text-sm" role="alert">
+            {error}
+          </p>
         ) : members.length === 0 ? (
           <p className="text-sm text-gray-300">No members yet.</p>
         ) : (

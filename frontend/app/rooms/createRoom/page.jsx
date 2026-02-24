@@ -25,7 +25,7 @@ const CreateRoomPage = () => {
     }
 
     if (!connected) {
-      setError("Socket not connected yet");
+      setError("Connecting to live server. Please wait a moment and retry.");
       return;
     }
 
@@ -57,6 +57,12 @@ const CreateRoomPage = () => {
       <div className="w-full max-w-md rounded-2xl p-8 shadow-xl">
         <h2 className="text-2xl font-semibold text-center mb-4">Create Room</h2>
 
+        {!connected && (
+          <p className="text-xs text-yellow-300 mb-3" role="status" aria-live="polite">
+            Reconnecting to live server...
+          </p>
+        )}
+
         <button
           onClick={handleSet}
           disabled={loading}
@@ -65,7 +71,11 @@ const CreateRoomPage = () => {
           {loading ? "Setting..." : "Set"}
         </button>
 
-        {error && <p className="text-red-400 text-sm mt-3">{error}</p>}
+        {error && (
+          <p className="text-red-400 text-sm mt-3" role="alert">
+            {error}
+          </p>
+        )}
       </div>
     </div>
   );
