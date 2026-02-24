@@ -60,6 +60,25 @@ const emitRoomMembers = async (io, redis, roomCode) => {
   return members;
 };
 
+const deleteRoomState = async (redis, roomCode, members) => {
+  for (const member of members) {
+    const userSocketKey = roomUserSocketsKey(roomCode, member.userId);
+    const socketIds = await redis.sMembers(userSocketKey);
+
+    if (socketIds.length > 0) {
+      const multi = redis.multi();
+      for (const socketId of socketIds) {
+        multi.sRem(socketRoomsKey(socketId), roomCode);
+      }
+      await multi.exec();
+    }
+
+    await redis.del(userSocketKey);
+  }
+
+  await redis.del(roomMetaKey(roomCode), roomMembersKey(roomCode));
+};
+
 export const initSocket = (io, redis) => {
   io.use(async (socket, next) => {
     try {
@@ -133,7 +152,14 @@ export const initSocket = (io, redis) => {
         const members = await emitRoomMembers(io, redis, roomCode);
 
         return typeof ack === "function"
-          ? ack(ok({ roomCode, hostName, members }))
+          ? ack(
+              ok({
+                roomCode,
+                hostName,
+                hostUserId: socket.data.user.id,
+                members,
+              })
+            )
           : undefined;
       } catch (error) {
         console.error("create-room error:", error.message);
@@ -181,8 +207,16 @@ export const initSocket = (io, redis) => {
         socket.join(normalizedCode);
         const members = await emitRoomMembers(io, redis, normalizedCode);
 
+        const roomMetaAfterJoin = await getRoomMeta(redis, normalizedCode);
         return typeof ack === "function"
-          ? ack(ok({ roomCode: normalizedCode, members }))
+          ? ack(
+              ok({
+                roomCode: normalizedCode,
+                hostName: roomMetaAfterJoin?.hostName || "",
+                hostUserId: roomMetaAfterJoin?.hostUserId || "",
+                members,
+              })
+            )
           : undefined;
       } catch (error) {
         console.error("join-room error:", error.message);
@@ -217,7 +251,14 @@ export const initSocket = (io, redis) => {
         }
 
         return typeof ack === "function"
-          ? ack(ok({ roomCode: normalizedCode, members }))
+          ? ack(
+              ok({
+                roomCode: normalizedCode,
+                hostName: roomMeta.hostName,
+                hostUserId: roomMeta.hostUserId,
+                members,
+              })
+            )
           : undefined;
       } catch (error) {
         console.error("get-room-members error:", error.message);
@@ -274,6 +315,49 @@ export const initSocket = (io, redis) => {
         console.error("leave-room error:", error.message);
         return typeof ack === "function"
           ? ack(fail("INTERNAL_ERROR", "Could not leave room"))
+          : undefined;
+      }
+    });
+
+    socket.on("close-room", async (payload = {}, ack) => {
+      try {
+        const normalizedCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!normalizedCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMeta(redis, normalizedCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        const requesterId = socket.data.user.id;
+        if (roomMeta.hostUserId !== requesterId) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Only host can close room"))
+            : undefined;
+        }
+
+        const members = await getRoomMembers(redis, normalizedCode);
+        io.to(normalizedCode).emit("room-closed", {
+          roomCode: normalizedCode,
+          message: "Room closed by host",
+        });
+        io.in(normalizedCode).socketsLeave(normalizedCode);
+
+        await deleteRoomState(redis, normalizedCode, members);
+
+        return typeof ack === "function"
+          ? ack(ok({ roomCode: normalizedCode }))
+          : undefined;
+      } catch (error) {
+        console.error("close-room error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not close room"))
           : undefined;
       }
     });
