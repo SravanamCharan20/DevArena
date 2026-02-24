@@ -1,12 +1,10 @@
-"use client";
-
-import { useSearchParams } from "next/navigation";
 import React from "react";
 
-const createRoom = () => {
-  const params = useSearchParams();
-  const roomCode = params.get("room");
+const CreateRoomPage = async ({ searchParams }) => {
+  const params = await searchParams;
+  const roomCode = params?.room || "N/A";
+
   return <div>Room Code: {roomCode}</div>;
 };
 
-export default createRoom;
+export default CreateRoomPage;

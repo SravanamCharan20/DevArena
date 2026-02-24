@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { UserProvider } from "./utils/UserContext";
+import { SocketProvider } from "./utils/SocketProvider";
 
 export const metadata: Metadata = {
   title: "CodeClash",
@@ -16,7 +17,9 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <UserProvider>
-          {children}
+          <SocketProvider>
+            {children}
+          </SocketProvider>
         </UserProvider>
       </body>
     </html>
