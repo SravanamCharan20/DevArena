@@ -1,6 +1,9 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import SurfaceCard from "../../components/ui/SurfaceCard";
+import PageHeader from "../../components/ui/PageHeader";
+import StatusMessage from "../../components/ui/StatusMessage";
 import { useSocket } from "../../utils/SocketProvider";
 import { useUser } from "../../utils/UserContext";
 
@@ -53,30 +56,36 @@ const CreateRoomPage = () => {
   if (user.role !== "admin") return null;
 
   return (
-    <div className="min-h-[40vh] flex items-center justify-center">
-      <div className="w-full max-w-md rounded-2xl p-8 shadow-xl">
-        <h2 className="text-2xl font-semibold text-center mb-4">Create Room</h2>
+    <div className="page-wrap">
+      <SurfaceCard className="mx-auto max-w-2xl p-7 sm:p-9">
+        <PageHeader
+          eyebrow="Admin only"
+          title="Create new room"
+          description="Generate a room code and move directly to the lobby as host."
+        />
 
-        {!connected && (
-          <p className="text-xs text-yellow-300 mb-3" role="status" aria-live="polite">
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-soft)] p-4">
+          <p className="text-sm">After creation, you can manage readiness and start contest.</p>
+        </div>
+
+        {!connected ? (
+          <StatusMessage variant="warn" role="status" className="mt-4">
             Reconnecting to live server...
-          </p>
-        )}
+          </StatusMessage>
+        ) : null}
 
         <button
           onClick={handleSet}
           disabled={loading}
-          className="block w-full text-center py-3 rounded-xl bg-green-500 hover:bg-green-600 transition-all duration-200 text-white font-medium disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+          className="btn btn-primary mt-6 w-full cursor-pointer py-3"
         >
-          {loading ? "Setting..." : "Set"}
+          {loading ? "Creating..." : "Create and Enter Lobby"}
         </button>
 
-        {error && (
-          <p className="text-red-400 text-sm mt-3" role="alert">
-            {error}
-          </p>
-        )}
-      </div>
+        <StatusMessage variant="error" role="alert" className="mt-3">
+          {error}
+        </StatusMessage>
+      </SurfaceCard>
     </div>
   );
 };

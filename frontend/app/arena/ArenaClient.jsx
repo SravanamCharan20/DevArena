@@ -1,6 +1,8 @@
 "use client";
 import React, { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import SurfaceCard from "../components/ui/SurfaceCard";
+import StatusMessage from "../components/ui/StatusMessage";
 import { useSocket } from "../utils/SocketProvider";
 import { useUser } from "../utils/UserContext";
 
@@ -96,42 +98,72 @@ const ArenaClient = ({ roomCode }) => {
   };
 
   return (
-    <div className="min-h-[40vh] flex items-center justify-center">
-      <div className="w-full max-w-md rounded-2xl p-8 shadow-xl text-center">
-        <h2 className="text-2xl font-semibold mb-3">Arena</h2>
-        <p>
-          Room Code: <span className="font-bold">{roomCode || "N/A"}</span>
-        </p>
+    <div className="page-wrap">
+      <div className="content-grid">
+        <SurfaceCard className="p-6 sm:p-7">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="chip">Contest running</p>
+              <h1 className="section-title mt-3">Arena</h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="chip">Room {roomCode || "N/A"}</span>
+              <span className="chip">{isHost ? "Host" : "Member"}</span>
+            </div>
+          </div>
 
-        {!connected && (
-          <p className="text-xs text-yellow-300 mt-3" role="status" aria-live="polite">
-            Reconnecting to live server...
-          </p>
-        )}
+          {!connected ? (
+            <StatusMessage variant="warn" role="status" className="mt-4">
+              Reconnecting to live server...
+            </StatusMessage>
+          ) : null}
 
-        {error && (
-          <p className="text-red-400 text-sm mt-4" role="alert">
+          <StatusMessage variant="error" role="alert" className="mt-3">
             {error}
-          </p>
-        )}
+          </StatusMessage>
+        </SurfaceCard>
 
-        <button
-          onClick={handleLeaveArena}
-          disabled={leaving}
-          className="w-full mt-6 py-3 rounded-lg bg-red-500 hover:bg-red-600 transition-all duration-200 text-white font-medium disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-        >
-          {leaving ? "Leaving..." : "Leave Arena"}
-        </button>
+        <div className="content-grid lg:grid-cols-[1.2fr_0.8fr]">
+          <SurfaceCard className="min-h-[360px] p-6 sm:p-7">
+            <h2 className="text-lg font-semibold">Contest workspace</h2>
+            <p className="body-muted mt-2 text-sm sm:text-base">
+              This area is reserved for problem statement, code editor, and submissions.
+            </p>
 
-        {isHost && (
-          <button
-            onClick={handleCloseRoom}
-            disabled={closing}
-            className="w-full mt-3 py-3 rounded-lg bg-red-700 hover:bg-red-800 transition-all duration-200 text-white font-medium disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-          >
-            {closing ? "Closing..." : "Close Room"}
-          </button>
-        )}
+            <div className="mt-6 rounded-xl border border-dashed border-[var(--border)] bg-[var(--surface-soft)] p-6 text-sm text-[var(--text-muted)]">
+              Workspace placeholder is ready for your coding integration.
+            </div>
+          </SurfaceCard>
+
+          <SurfaceCard className="h-fit p-6 sm:p-7">
+            <h3 className="text-lg font-semibold">Room controls</h3>
+            <p className="body-muted mt-2 text-sm">Leave safely or close room if you are host.</p>
+
+            <div className="mt-5 space-y-3">
+              <button
+                onClick={handleLeaveArena}
+                disabled={leaving}
+                className="btn btn-danger w-full cursor-pointer py-3"
+              >
+                {leaving ? "Leaving..." : "Leave Arena"}
+              </button>
+
+              {isHost ? (
+                <button
+                  onClick={handleCloseRoom}
+                  disabled={closing}
+                  className="btn btn-secondary w-full cursor-pointer py-3"
+                >
+                  {closing ? "Closing..." : "Close Room"}
+                </button>
+              ) : (
+                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-soft)] px-3 py-2.5 text-sm text-[var(--text-muted)]">
+                  Only host can close room.
+                </div>
+              )}
+            </div>
+          </SurfaceCard>
+        </div>
       </div>
     </div>
   );

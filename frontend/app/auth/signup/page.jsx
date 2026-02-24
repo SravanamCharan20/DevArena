@@ -2,6 +2,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import SurfaceCard from "../../components/ui/SurfaceCard";
+import StatusMessage from "../../components/ui/StatusMessage";
 import { API_BASE_URL } from "../../utils/config";
 
 export default function Signup() {
@@ -10,12 +12,13 @@ export default function Signup() {
   const [password, setPassword] = useState("");
   const [success, setSuccess] = useState("");
   const [error, setError] = useState("");
-
+  const [submitting, setSubmitting] = useState(false);
   const router = useRouter();
 
   const handleSignup = async () => {
     setError("");
     setSuccess("");
+    setSubmitting(true);
 
     try {
       const res = await fetch(`${API_BASE_URL}/auth/signup`, {
@@ -27,79 +30,81 @@ export default function Signup() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || "Signup failed");
 
-      setSuccess("Welcome to the Arena ⚔️");
+      setSuccess("Account created. Redirecting...");
       router.push("/auth/signin");
     } catch (err) {
       setError(err.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center text-white">
-      <div className="w-[420px] border border-neutral-800 rounded-xl bg-black/70 backdrop-blur-md p-8">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <h1 className="text-green-400 text-5xl mb-3">&lt;/&gt;</h1>
-          <h1 className="text-3xl font-semibold tracking-wide flex justify-center items-center gap-2">
-            Register to level up
-          </h1>
-          <p className="text-neutral-400 mt-3 text-sm">
-            Create Account. Enter the Arena.
-          </p>
-          <p className="text-neutral-500 text-xs mt-1">
-            Skill speaks louder than words.
-          </p>
+    <div className="page-wrap">
+      <SurfaceCard className="mx-auto max-w-lg p-8 sm:p-10">
+        <p className="chip">New account</p>
+        <h1 className="section-title mt-4">Create your DevArena profile</h1>
+        <p className="body-muted mt-2 text-sm sm:text-base">
+          Register once and participate in real-time coding rooms.
+        </p>
+
+        <div className="mt-6 space-y-4">
+          <label className="block text-sm">
+            <span className="mb-2 block text-[var(--text-muted)]">Username</span>
+            <input
+              type="text"
+              placeholder="charan"
+              className="input"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </label>
+
+          <label className="block text-sm">
+            <span className="mb-2 block text-[var(--text-muted)]">Email</span>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              className="input"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </label>
+
+          <label className="block text-sm">
+            <span className="mb-2 block text-[var(--text-muted)]">Password</span>
+            <input
+              type="password"
+              placeholder="At least 6 characters"
+              className="input"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
         </div>
 
-        {/* Inputs */}
-        <div className="flex flex-col gap-3 mb-5">
-          <input
-            type="text"
-            placeholder="Username"
-            className="bg-neutral-900 border border-neutral-700 rounded-md px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500"
-            onChange={(e) => setUsername(e.target.value)}
-          />
-
-          <input
-            type="email"
-            placeholder="Email"
-            className="bg-neutral-900 border border-neutral-700 rounded-md px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500"
-            onChange={(e) => setEmail(e.target.value)}
-          />
-
-          <input
-            type="password"
-            placeholder="Password"
-            className="bg-neutral-900 border border-neutral-700 rounded-md px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500"
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-
-        {/* Primary CTA */}
         <button
           onClick={handleSignup}
-          className="w-full bg-green-500 cursor-pointer hover:bg-green-400 text-black font-medium py-3 rounded-md transition mb-3"
+          disabled={submitting || !username || !email || !password}
+          className="btn btn-primary mt-6 w-full cursor-pointer py-3"
         >
-          Spawn Account
+          {submitting ? "Creating..." : "Create Account"}
         </button>
 
-        {/* Status */}
-        {success && (
-          <p className="text-green-400 text-center text-xs mt-4">{success}</p>
-        )}
+        <StatusMessage variant="ok" role="status" className="mt-3">
+          {success}
+        </StatusMessage>
+        <StatusMessage variant="error" role="alert" className="mt-3">
+          {error}
+        </StatusMessage>
 
-        {error && (
-          <p className="text-red-400 text-center text-xs mt-4">{error}</p>
-        )}
-
-        {/* Footer */}
-        <p className="text-neutral-500 text-xs text-center mt-6">
-          Your are not new?{" "}
-          <Link className="text-green-500 hover:underline" href="/auth/signin">
-            Signin here
+        <p className="body-muted mt-6 text-sm">
+          Already registered?{" "}
+          <Link className="font-medium text-[var(--accent)] hover:underline" href="/auth/signin">
+            Sign in
           </Link>
         </p>
-      </div>
+      </SurfaceCard>
     </div>
   );
 }

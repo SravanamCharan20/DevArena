@@ -2,6 +2,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import SurfaceCard from "../../components/ui/SurfaceCard";
+import StatusMessage from "../../components/ui/StatusMessage";
 import { useUser } from "../../utils/UserContext";
 import { API_BASE_URL } from "../../utils/config";
 
@@ -10,12 +12,13 @@ export default function Signin() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const { setUser } = useUser();
-
+  const [submitting, setSubmitting] = useState(false);
+  const { setUser, refreshActiveRoom } = useUser();
   const router = useRouter();
 
   const handleSignin = async () => {
     setError("");
+    setSubmitting(true);
     try {
       const res = await fetch(`${API_BASE_URL}/auth/signin`, {
         method: "POST",
@@ -28,71 +31,71 @@ export default function Signin() {
       if (!res.ok) throw new Error(data.message || "Signin failed");
 
       setUser(data.user);
-      setSuccess("Welcome back! Let’s get coding ⚡");
-
+      await refreshActiveRoom();
+      setSuccess("Signed in successfully");
       router.push("/dashboard");
     } catch (err) {
       setError(err.message);
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-black flex items-center justify-center text-white">
-      <div className="w-[420px] border border-neutral-800 rounded-xl bg-black/70 backdrop-blur-md p-8">
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <h1 className="text-green-400 text-5xl mb-3">&lt;/&gt;</h1>
-          <h1 className="text-3xl font-semibold tracking-wide flex justify-center items-center gap-2">
-            Login. Compile. Dominate.
-          </h1>
-          <p className="text-neutral-400 mt-3 text-sm">
-            Real-Time Competitive Coding
-          </p>
-          <p className="text-neutral-500 text-xs mt-1">
-            Compete live on DSA problems with friends
-          </p>
+    <div className="page-wrap">
+      <SurfaceCard className="mx-auto max-w-lg p-8 sm:p-10">
+        <p className="chip">Welcome back</p>
+        <h1 className="section-title mt-4">Sign in to DevArena</h1>
+        <p className="body-muted mt-2 text-sm sm:text-base">
+          Continue your rooms and ongoing contests from where you left off.
+        </p>
+
+        <div className="mt-6 space-y-4">
+          <label className="block text-sm">
+            <span className="mb-2 block text-[var(--text-muted)]">Email</span>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              className="input"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </label>
+
+          <label className="block text-sm">
+            <span className="mb-2 block text-[var(--text-muted)]">Password</span>
+            <input
+              type="password"
+              placeholder="Enter your password"
+              className="input"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </label>
         </div>
 
-        {/* Inputs */}
-        <div className="flex flex-col gap-3 mb-5">
-          <input
-            type="email"
-            placeholder="Email"
-            className="bg-neutral-900 border border-neutral-700 rounded-md px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500"
-            onChange={(e) => setEmail(e.target.value)}
-          />
-
-          <input
-            type="password"
-            placeholder="Password"
-            className="bg-neutral-900 border border-neutral-700 rounded-md px-4 py-3 text-sm focus:outline-none focus:ring-1 focus:ring-green-500"
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-
-        {/* Primary CTA */}
         <button
           onClick={handleSignin}
-          className="w-full bg-green-500 cursor-pointer hover:bg-green-400 text-black font-medium py-3 rounded-md transition mb-3"
+          disabled={submitting || !email || !password}
+          className="btn btn-primary mt-6 w-full cursor-pointer py-3"
         >
-          Enter Arena
+          {submitting ? "Signing in..." : "Sign In"}
         </button>
 
-        {success && (
-          <p className="text-green-400 text-center text-xs mt-4">{success}</p>
-        )}
-        {error && (
-          <p className="text-red-400 text-center text-xs mt-4">{error}</p>
-        )}
+        <StatusMessage variant="ok" role="status" className="mt-3">
+          {success}
+        </StatusMessage>
+        <StatusMessage variant="error" role="alert" className="mt-3">
+          {error}
+        </StatusMessage>
 
-        {/* Footer Text */}
-        <p className="text-neutral-500 text-xs text-center mt-6">
-          New here?{" "}
-          <Link className="text-green-500 hover:underline" href="/auth/signup">
-            Join the arena
+        <p className="body-muted mt-6 text-sm">
+          New to DevArena?{" "}
+          <Link className="font-medium text-[var(--accent)] hover:underline" href="/auth/signup">
+            Create account
           </Link>
         </p>
-      </div>
+      </SurfaceCard>
     </div>
   );
 }

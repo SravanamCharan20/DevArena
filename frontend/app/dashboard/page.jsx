@@ -1,8 +1,11 @@
 "use client";
 import React, { useState } from "react";
-import { useUser } from "../utils/UserContext";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import SurfaceCard from "../components/ui/SurfaceCard";
+import PageHeader from "../components/ui/PageHeader";
+import StatusMessage from "../components/ui/StatusMessage";
+import { useUser } from "../utils/UserContext";
 import { useSocket } from "../utils/SocketProvider";
 
 const Dashboard = () => {
@@ -50,31 +53,35 @@ const Dashboard = () => {
   };
 
   return (
-    <div className="min-h-[40vh] flex items-center justify-center">
-      <div className="w-full max-w-sm shadow-xl rounded-2xl p-8">
-        <h2 className="text-2xl font-semibold text-green-400/70 text-center mb-6">
-          Welcome
-        </h2>
+    <div className="page-wrap">
+      <div className="content-grid lg:grid-cols-[1.18fr_0.82fr]">
+        <SurfaceCard className="p-6 sm:p-7">
+          <PageHeader
+            eyebrow={isAdmin ? "Admin dashboard" : "Participant dashboard"}
+            title="Your current session"
+            description="Resume active rooms quickly or start a new one."
+          />
 
-        {!connected && (
-          <p className="text-xs text-yellow-300 mb-4" role="status" aria-live="polite">
-            Reconnecting to live server...
-          </p>
-        )}
+          {!connected ? (
+            <StatusMessage variant="warn" role="status" className="mb-4">
+              Reconnecting to live server...
+            </StatusMessage>
+          ) : null}
 
-        <div className="flex flex-col gap-4">
-          {(hasRunningContest || hasLobbyRoom) && (
-            <div className="rounded-xl border border-white/20 p-4">
-              <p className="text-sm text-gray-300">
-                {hasRunningContest ? "Ongoing Contest" : "Active Lobby"}
+          {hasAnyActiveRoom ? (
+            <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-5">
+              <p className="text-sm text-[var(--text-muted)]">
+                {hasRunningContest ? "Contest in progress" : "Lobby in progress"}
               </p>
-              <p className="text-sm mt-1">
-                Room: <span className="font-bold">{activeRoom.roomCode}</span>
-              </p>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <p className="text-xl font-semibold">{activeRoom.roomCode}</p>
+                <span className="chip">{hasRunningContest ? "Running" : "Lobby"}</span>
+              </div>
+
               <button
                 onClick={handleResume}
                 disabled={resumeLoading}
-                className="w-full mt-3 py-2 rounded-lg bg-yellow-500 hover:bg-yellow-600 transition-all duration-200 text-black font-medium disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
+                className="btn btn-primary mt-5 w-full cursor-pointer py-3"
               >
                 {resumeLoading
                   ? "Checking..."
@@ -82,38 +89,56 @@ const Dashboard = () => {
                     ? "Resume Contest"
                     : "Open Lobby"}
               </button>
-              {resumeError && (
-                <p className="text-red-400 text-xs mt-2" role="alert">
-                  {resumeError}
-                </p>
-              )}
+
+              <StatusMessage variant="error" role="alert" className="mt-3">
+                {resumeError}
+              </StatusMessage>
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--surface-soft)] p-6">
+              <p className="font-medium">No active room</p>
+              <p className="body-muted mt-2 text-sm">
+                Choose create room or join room from the actions panel.
+              </p>
             </div>
           )}
+        </SurfaceCard>
 
-          {!hasAnyActiveRoom && isAdmin && (
-            <Link
-              href="/rooms/createRoom"
-              className="w-full py-3 rounded-xl cursor-pointer bg-green-400/70 hover:bg-green-600 transition-all duration-200 text-white font-medium shadow-md hover:shadow-lg active:scale-[0.98]"
-            >
-              Create Room
-            </Link>
-          )}
+        <SurfaceCard className="p-6 sm:p-7">
+          <h2 className="text-lg font-semibold">Actions</h2>
+          <p className="body-muted mt-2 text-sm">
+            Use these options to enter your next coding room.
+          </p>
 
-          {!hasAnyActiveRoom && (
-            <Link
-              href="/rooms/joinRoom"
-              className="w-full text-center py-3 rounded-xl bg-indigo-500/70 hover:bg-indigo-600 transition-all duration-200 text-white font-medium shadow-md hover:shadow-lg active:scale-[0.98]"
-            >
-              Join Room
-            </Link>
-          )}
+          <div className="mt-5 space-y-3">
+            {!hasAnyActiveRoom && isAdmin ? (
+              <Link
+                href="/rooms/createRoom"
+                className="btn btn-primary flex w-full justify-center py-3"
+              >
+                Create Room
+              </Link>
+            ) : null}
 
-          {hasAnyActiveRoom && (
-            <p className="text-xs text-gray-300" role="status" aria-live="polite">
-              Leave your current room before creating or joining another one.
-            </p>
-          )}
-        </div>
+            {!hasAnyActiveRoom ? (
+              <Link
+                href="/rooms/joinRoom"
+                className="btn btn-secondary flex w-full justify-center py-3"
+              >
+                Join Room
+              </Link>
+            ) : null}
+          </div>
+
+          {hasAnyActiveRoom ? (
+            <>
+              <div className="soft-divider mt-5" />
+              <StatusMessage variant="info" role="status" className="mt-4">
+                Leave your current room before creating or joining another one.
+              </StatusMessage>
+            </>
+          ) : null}
+        </SurfaceCard>
       </div>
     </div>
   );
