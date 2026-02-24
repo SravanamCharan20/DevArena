@@ -24,7 +24,14 @@ const JoinRoomPage = () => {
           setError(ack?.message || "Could not join room");
           return;
         }
-        router.push(`/lobby?room=${ack.roomCode}`);
+
+        const nextRoomCode = ack?.data?.roomCode;
+        if (!nextRoomCode) {
+          setError("Could not join room");
+          return;
+        }
+
+        router.push(`/lobby?room=${nextRoomCode}`);
       }
     );
   };

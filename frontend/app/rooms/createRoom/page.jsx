@@ -21,11 +21,17 @@ const CreateRoomPage = () => {
     socket.emit("create-room", {}, (ack) => {
       setLoading(false);
       if (!ack?.ok) {
+        setError(ack?.message || "Could not create room");
+        return;
+      }
+
+      const nextRoomCode = ack?.data?.roomCode;
+      if (!nextRoomCode) {
         setError("Could not create room");
         return;
       }
 
-      router.push(`/lobby?room=${ack.roomCode}`);
+      router.push(`/lobby?room=${nextRoomCode}`);
     });
   };
 

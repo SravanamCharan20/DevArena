@@ -28,7 +28,7 @@ const LobbyClient = ({ roomCode }) => {
       }
 
       setError("");
-      setMembers(Array.isArray(ack.members) ? ack.members : []);
+      setMembers(Array.isArray(ack?.data?.members) ? ack.data.members : []);
     });
 
     return () => {
@@ -55,7 +55,7 @@ const LobbyClient = ({ roomCode }) => {
           <ul className="space-y-2">
             {members.map((member) => (
               <li
-                key={member.socketId}
+                key={member.userId || member.socketId}
                 className="rounded-lg border border-white/10 px-3 py-2"
               >
                 {member.username}
