@@ -54,6 +54,27 @@ const formatDuration = (ms) => {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 };
 
+const createRunResultText = (payload = {}) => {
+  const lines = [];
+
+  lines.push(`Verdict: ${payload.verdict || "Unknown"}`);
+  if (Number.isFinite(Number(payload.runtimeMs))) {
+    lines.push(`Runtime: ${Number(payload.runtimeMs)} ms`);
+  }
+  if (payload.stdout) {
+    lines.push("");
+    lines.push("stdout:");
+    lines.push(String(payload.stdout));
+  }
+  if (payload.stderr) {
+    lines.push("");
+    lines.push("stderr:");
+    lines.push(String(payload.stderr));
+  }
+
+  return lines.join("\n");
+};
+
 const ArenaClient = ({ roomCode }) => {
   const router = useRouter();
   const { socket, connected } = useSocket();
@@ -78,12 +99,16 @@ const ArenaClient = ({ roomCode }) => {
   const [runOutput, setRunOutput] = useState("");
   const [runStatus, setRunStatus] = useState("");
   const [consoleTab, setConsoleTab] = useState("testcase");
+  const [runningCode, setRunningCode] = useState(false);
+  const [submittingCode, setSubmittingCode] = useState(false);
 
   const [leaving, setLeaving] = useState(false);
   const [closing, setClosing] = useState(false);
   const [endingContest, setEndingContest] = useState(false);
 
   const contestEndRequestedRef = useRef(false);
+  const activeRunRequestIdRef = useRef("");
+  const activeSubmitRequestIdRef = useRef("");
   const isHost = Boolean(user?._id && hostUserId && user._id === hostUserId);
   const activeCode = codeByLanguage[language] || "";
 
@@ -99,7 +124,10 @@ const ArenaClient = ({ roomCode }) => {
     return [...members].sort((a, b) => {
       const scoreA = Number.isFinite(Number(a?.score)) ? Number(a.score) : 0;
       const scoreB = Number.isFinite(Number(b?.score)) ? Number(b.score) : 0;
+      const penaltyA = Number.isFinite(Number(a?.penalty)) ? Number(a.penalty) : 0;
+      const penaltyB = Number.isFinite(Number(b?.penalty)) ? Number(b.penalty) : 0;
       if (scoreB !== scoreA) return scoreB - scoreA;
+      if (penaltyA !== penaltyB) return penaltyA - penaltyB;
       return String(a?.username || "").localeCompare(String(b?.username || ""));
     });
   }, [members]);
@@ -196,9 +224,70 @@ const ArenaClient = ({ roomCode }) => {
       setMembers(nextMembers);
     };
 
+    const handleRunResult = (payload = {}) => {
+      const data = payload?.data || {};
+      const incomingRequestId = String(data.requestId || payload?.requestId || "");
+      const incomingRoomCode = String(data.roomCode || payload?.roomCode || "");
+
+      if (!activeRunRequestIdRef.current) return;
+      if (incomingRequestId !== activeRunRequestIdRef.current) return;
+      if (incomingRoomCode && incomingRoomCode !== roomCode) return;
+
+      setRunningCode(false);
+      setRunStatus(data.verdict || "Run completed");
+      setRunOutput(createRunResultText(data));
+      setConsoleTab("result");
+      activeRunRequestIdRef.current = "";
+    };
+
+    const handleSubmissionResult = (payload = {}) => {
+      const data = payload?.data || {};
+      const incomingRequestId = String(data.requestId || payload?.requestId || "");
+      const incomingRoomCode = String(data.roomCode || payload?.roomCode || "");
+
+      if (!activeSubmitRequestIdRef.current) return;
+      if (incomingRequestId !== activeSubmitRequestIdRef.current) return;
+      if (incomingRoomCode && incomingRoomCode !== roomCode) return;
+
+      setSubmittingCode(false);
+      const verdict = data.verdict || payload?.message || "Submission completed";
+      const scoreDelta = Number.isFinite(Number(data.scoreDelta)) ? Number(data.scoreDelta) : 0;
+      const penaltyDelta = Number.isFinite(Number(data.penaltyDelta))
+        ? Number(data.penaltyDelta)
+        : 0;
+
+      setRunStatus(verdict);
+      setRunOutput(
+        [
+          `Verdict: ${verdict}`,
+          Number.isFinite(Number(data.runtimeMs)) ? `Runtime: ${Number(data.runtimeMs)} ms` : "",
+          Number.isFinite(Number(data.testcasesPassed))
+            ? `Passed: ${Number(data.testcasesPassed)} / ${Number(data.testcasesTotal || 0)}`
+            : "",
+          `Score Delta: ${scoreDelta >= 0 ? "+" : ""}${scoreDelta}`,
+          `Penalty Delta: ${penaltyDelta >= 0 ? "+" : ""}${penaltyDelta}`,
+          data.stdout ? `\nstdout:\n${String(data.stdout)}` : "",
+          data.stderr ? `\nstderr:\n${String(data.stderr)}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n")
+      );
+      setConsoleTab("result");
+      activeSubmitRequestIdRef.current = "";
+    };
+
+    const handleLeaderboardUpdated = (payload = {}) => {
+      if (payload.roomCode !== roomCode) return;
+      const nextMembers = Array.isArray(payload.members) ? payload.members : [];
+      setMembers(nextMembers);
+    };
+
     socket.on("room-closed", handleRoomClosed);
     socket.on("contest-ended", handleContestEnded);
     socket.on("room-members-updated", handleRoomMembersUpdated);
+    socket.on("run-result", handleRunResult);
+    socket.on("submission-result", handleSubmissionResult);
+    socket.on("leaderboard-updated", handleLeaderboardUpdated);
 
     socket.emit("join-room", { roomCode }, async (ack) => {
       if (!ack?.ok) {
@@ -232,6 +321,9 @@ const ArenaClient = ({ roomCode }) => {
       socket.off("room-closed", handleRoomClosed);
       socket.off("contest-ended", handleContestEnded);
       socket.off("room-members-updated", handleRoomMembersUpdated);
+      socket.off("run-result", handleRunResult);
+      socket.off("submission-result", handleSubmissionResult);
+      socket.off("leaderboard-updated", handleLeaderboardUpdated);
     };
   }, [
     connected,
@@ -244,6 +336,12 @@ const ArenaClient = ({ roomCode }) => {
   ]);
 
   const handleRunCode = () => {
+    if (!connected) {
+      setRunStatus("Connecting to live server. Please wait and retry.");
+      setConsoleTab("result");
+      return;
+    }
+
     if (!selectedProblem) {
       setRunStatus("No problem selected");
       setRunOutput("");
@@ -251,22 +349,38 @@ const ArenaClient = ({ roomCode }) => {
       return;
     }
 
-    const example = Array.isArray(selectedProblem.exampleTestcases)
-      ? selectedProblem.exampleTestcases[0]
-      : null;
-
-    if (example) {
-      setRunStatus("Sample run completed");
-      setRunOutput(
-        `Input:\n${customInput || example.input}\n\nOutput:\n${example.output}\n\nNote: Judge integration pending.`
-      );
-      setConsoleTab("result");
-      return;
-    }
-
-    setRunStatus("Run completed");
-    setRunOutput("Judge integration pending. Configure executor to run code.");
+    const requestId =
+      globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    activeRunRequestIdRef.current = requestId;
+    setRunningCode(true);
+    setRunStatus("Queued for sandbox execution...");
+    setRunOutput("");
     setConsoleTab("result");
+
+    socket.emit(
+      "run-code",
+      {
+        roomCode,
+        problemId: selectedProblem._id,
+        contestId: contest?._id,
+        language,
+        code: activeCode,
+        customInput,
+        requestId,
+      },
+      (ack) => {
+        if (!ack?.ok) {
+          setRunningCode(false);
+          setRunStatus(ack?.message || "Could not run code");
+          setRunOutput("");
+          activeRunRequestIdRef.current = "";
+          return;
+        }
+
+        setRunStatus("Running in secure container...");
+      }
+    );
   };
 
   const handleResetRunner = () => {
@@ -274,6 +388,53 @@ const ArenaClient = ({ roomCode }) => {
     setRunStatus("");
     setRunOutput("");
     setConsoleTab("testcase");
+  };
+
+  const handleSubmitCode = () => {
+    if (!connected) {
+      setRunStatus("Connecting to live server. Please wait and retry.");
+      setConsoleTab("result");
+      return;
+    }
+
+    if (!selectedProblem) {
+      setRunStatus("No problem selected");
+      setRunOutput("");
+      setConsoleTab("result");
+      return;
+    }
+
+    const requestId =
+      globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    activeSubmitRequestIdRef.current = requestId;
+    setSubmittingCode(true);
+    setRunStatus("Submission queued for judging...");
+    setRunOutput("");
+    setConsoleTab("result");
+
+    socket.emit(
+      "submit-code",
+      {
+        roomCode,
+        problemId: selectedProblem._id,
+        contestId: contest?._id,
+        language,
+        code: activeCode,
+        requestId,
+      },
+      (ack) => {
+        if (!ack?.ok) {
+          setSubmittingCode(false);
+          setRunStatus(ack?.message || "Could not submit code");
+          setRunOutput("");
+          activeSubmitRequestIdRef.current = "";
+          return;
+        }
+
+        setRunStatus("Judging against hidden testcases...");
+      }
+    );
   };
 
   const handleLeaveArena = () => {
@@ -371,12 +532,20 @@ const ArenaClient = ({ roomCode }) => {
                     key={member.userId}
                     className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm"
                   >
-                    <span className="text-[var(--text)]">
-                      {index + 1}. {member.username}
-                    </span>
-                    <span className="font-semibold text-[var(--text)]">
-                      {Number.isFinite(Number(member?.score)) ? member.score : 0}
-                    </span>
+                    <span className="text-[var(--text)]">{index + 1}. {member.username}</span>
+                    <div className="text-right">
+                      <p className="font-semibold text-[var(--text)]">
+                        {Number.isFinite(Number(member?.score)) ? member.score : 0} pts
+                      </p>
+                      <p className="text-xs text-[var(--text-muted)]">
+                        Penalty {Number.isFinite(Number(member?.penalty)) ? member.penalty : 0}
+                        {" · "}
+                        Solved{" "}
+                        {Number.isFinite(Number(member?.solvedCount))
+                          ? member.solvedCount
+                          : 0}
+                      </p>
+                    </div>
                   </li>
                 ))}
               </ol>
@@ -595,21 +764,24 @@ const ArenaClient = ({ roomCode }) => {
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <button
                       onClick={handleRunCode}
+                      disabled={runningCode || submittingCode}
                       className="rounded-xl bg-emerald-500 px-5 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400"
                     >
-                      Run
+                      {runningCode ? "Running..." : "Run"}
                     </button>
                     <button
                       onClick={handleResetRunner}
+                      disabled={runningCode || submittingCode}
                       className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-2 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--border-strong)]"
                     >
                       Reset
                     </button>
                     <button
-                      disabled
-                      className="cursor-not-allowed rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-2 text-sm font-semibold text-[var(--text-muted)]"
+                      onClick={handleSubmitCode}
+                      disabled={runningCode || submittingCode}
+                      className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-2 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Submit (Soon)
+                      {submittingCode ? "Submitting..." : "Submit"}
                     </button>
                   </div>
                 </>

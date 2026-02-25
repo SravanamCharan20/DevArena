@@ -25,6 +25,18 @@ const participantSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    penalty: {
+      type: Number,
+      default: 0,
+    },
+    solvedCount: {
+      type: Number,
+      default: 0,
+    },
+    solvedProblemIds: {
+      type: [String],
+      default: [],
+    },
     joinedAt: {
       type: Date,
       default: Date.now,

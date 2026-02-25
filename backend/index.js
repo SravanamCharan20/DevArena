@@ -14,6 +14,10 @@ import {
   redisClient,
   createRedisPubSubClients,
 } from "./config/redis.js";
+import {
+  ensureRunCodeQueueReady,
+  registerRunCodeQueueHandlers,
+} from "./services/judge/queue.js";
 
 dotenv.config();
 const PORT = process.env.PORT || 8888;
@@ -63,6 +67,8 @@ const startServer = async () => {
   await connectRedis();
   const { pubClient, subClient } = await createRedisPubSubClients();
   io.adapter(createAdapter(pubClient, subClient));
+  await ensureRunCodeQueueReady();
+  registerRunCodeQueueHandlers({ io });
 
   initSocket(io, redisClient);
 
