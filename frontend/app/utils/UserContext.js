@@ -18,6 +18,7 @@ export const UserProvider = ({ children }) => {
     try {
       const res = await fetch(`${API_BASE_URL}/contest/active`, {
         credentials: "include",
+        cache: "no-store",
       });
 
       if (!res.ok) {
@@ -41,6 +42,7 @@ export const UserProvider = ({ children }) => {
       try {
         const res = await fetch(`${API_BASE_URL}/auth/profile`, {
           credentials: "include",
+          cache: "no-store",
         });
 
         if (!res.ok) {

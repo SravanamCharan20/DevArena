@@ -44,6 +44,12 @@ const Navbar = () => {
                 </Link>
               ) : null}
 
+              {user?.role === "admin" ? (
+                <Link href="/problems" className="btn btn-secondary h-9 px-3 text-sm">
+                  Problems
+                </Link>
+              ) : null}
+
               <ThemeToggle />
 
               {!user ? (

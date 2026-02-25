@@ -56,12 +56,21 @@ const contestRoomSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    contestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Contest",
+      required: true,
+    },
     status: {
       type: String,
       enum: ["lobby", "running", "ended", "closed"],
       default: "lobby",
     },
     contestStartAt: {
+      type: Date,
+      default: null,
+    },
+    contestEndAt: {
       type: Date,
       default: null,
     },

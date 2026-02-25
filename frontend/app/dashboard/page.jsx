@@ -42,13 +42,14 @@ const Dashboard = () => {
         return;
       }
 
+      const nextRoomCode = ack?.data?.roomCode || activeRoom.roomCode;
       const nextStatus = ack?.data?.status;
       if (nextStatus === "running") {
-        router.push(`/arena?room=${activeRoom.roomCode}`);
+        router.push(`/arena?room=${nextRoomCode}`);
         return;
       }
 
-      router.push(`/lobby?room=${activeRoom.roomCode}`);
+      router.push(`/lobby?room=${nextRoomCode}`);
     });
   };
 

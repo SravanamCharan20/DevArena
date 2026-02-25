@@ -1,13 +1,23 @@
 import { randomUUID } from "crypto";
+import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Contest from "../models/Contest.js";
 import ContestRoom from "../models/ContestRoom.js";
+import Problem from "../models/Problem.js";
 
 const ROOM_TTL_SECONDS = 60 * 60 * 6;
 const CONTEST_COUNTDOWN_MS = 3000;
 const ACTIVE_ROOM_STATUSES = ["lobby", "running"];
+const ROOM_STATUS_TO_CONTEST_ACTIVE = {
+  lobby: true,
+  running: true,
+  ended: false,
+  closed: false,
+};
 const REJOIN_PARTICIPANT_STATES = new Set(["active", "disconnected"]);
 const CACHE_MEMBER_STATES = new Set(["active"]);
+const contestEndTimers = new Map();
 
 const ok = (data) => ({ ok: true, data });
 const fail = (code, message) => ({ ok: false, code, message });
@@ -21,6 +31,38 @@ const normalizeRoomCode = (value) =>
   String(value || "")
     .trim()
     .toUpperCase();
+
+const normalizeProblemIds = (value) => {
+  if (!Array.isArray(value)) return [];
+  const uniqueProblemIds = new Set();
+
+  for (const item of value) {
+    const problemId = String(item || "").trim();
+    if (!problemId) continue;
+    if (!mongoose.Types.ObjectId.isValid(problemId)) continue;
+    uniqueProblemIds.add(problemId);
+  }
+
+  return Array.from(uniqueProblemIds);
+};
+
+const normalizeContestTitle = (value, roomCode) => {
+  const rawTitle = String(value || "").trim();
+  if (rawTitle) return rawTitle.slice(0, 120);
+  return `Room ${roomCode} Contest`;
+};
+
+const normalizeContestDescription = (value) =>
+  String(value || "")
+    .trim()
+    .slice(0, 2000);
+
+const normalizeContestDuration = (value) => {
+  const duration = Number(value);
+  if (!Number.isFinite(duration)) return 90;
+  const bounded = Math.max(5, Math.min(720, Math.floor(duration)));
+  return bounded;
+};
 
 const getCookieValue = (cookieHeader = "", key) => {
   const part = cookieHeader
@@ -41,12 +83,16 @@ const toMember = (socket, ready = false) => ({
   userId: socket.data.user.id,
   username: socket.data.user.username,
   ready,
+  score: 0,
 });
 
 const participantToMember = (participant) => ({
   userId: participant.userId,
   username: participant.username,
   ready: participant.ready === true,
+  score: Number.isFinite(Number(participant.score))
+    ? Number(participant.score)
+    : 0,
 });
 
 const toMillis = (value) => {
@@ -54,6 +100,19 @@ const toMillis = (value) => {
   const dateValue = value instanceof Date ? value : new Date(value);
   const ms = dateValue.getTime();
   return Number.isFinite(ms) ? ms : null;
+};
+
+const contestActiveForRoomStatus = (status) =>
+  ROOM_STATUS_TO_CONTEST_ACTIVE[status] ?? false;
+
+const syncContestActiveState = async (contestId, roomStatus) => {
+  const normalizedContestId = String(contestId || "").trim();
+  if (!normalizedContestId) return;
+
+  await Contest.updateOne(
+    { _id: normalizedContestId, isActive: { $ne: contestActiveForRoomStatus(roomStatus) } },
+    { $set: { isActive: contestActiveForRoomStatus(roomStatus) } }
+  );
 };
 
 const getRoomMeta = async (redis, roomCode) => {
@@ -114,6 +173,15 @@ const syncRoomDocMeta = (roomDoc, roomMeta) => {
   if (!roomMeta) return false;
 
   let changed = false;
+  const roomMetaContestId = String(roomMeta.contestId || "").trim();
+  if (
+    roomMetaContestId &&
+    String(roomDoc.contestId || "") !== roomMetaContestId
+  ) {
+    roomDoc.contestId = roomMetaContestId;
+    changed = true;
+  }
+
   if (roomDoc.hostUserId !== roomMeta.hostUserId) {
     roomDoc.hostUserId = roomMeta.hostUserId;
     changed = true;
@@ -139,20 +207,38 @@ const syncRoomDocMeta = (roomDoc, roomMeta) => {
     changed = true;
   }
 
+  const currentEndAt = toMillis(roomDoc.contestEndAt);
+  const nextEndAt =
+    typeof roomMeta.contestEndAt === "number" ? roomMeta.contestEndAt : null;
+
+  if (currentEndAt !== nextEndAt) {
+    roomDoc.contestEndAt =
+      typeof nextEndAt === "number" ? new Date(nextEndAt) : null;
+    changed = true;
+  }
+
   return changed;
 };
 
 const ensureContestRoom = async (roomCode, roomMeta) => {
   let roomDoc = await ContestRoom.findOne({ roomCode });
   if (!roomDoc && roomMeta) {
+    const contestId = String(roomMeta.contestId || "").trim();
+    if (!contestId) return null;
+
     roomDoc = new ContestRoom({
       roomCode,
+      contestId,
       hostUserId: roomMeta.hostUserId,
       hostName: roomMeta.hostName,
       status: roomMeta.status,
       contestStartAt:
         typeof roomMeta.contestStartAt === "number"
           ? new Date(roomMeta.contestStartAt)
+          : null,
+      contestEndAt:
+        typeof roomMeta.contestEndAt === "number"
+          ? new Date(roomMeta.contestEndAt)
           : null,
       participants: [],
     });
@@ -241,16 +327,35 @@ const setContestParticipantState = async ({ roomCode, userId, state, ready }) =>
   return roomDoc;
 };
 
-const setContestRoomStatus = async ({ roomCode, status, contestStartAt }) => {
+const setContestRoomStatus = async ({
+  roomCode,
+  status,
+  contestStartAt,
+  contestEndAt,
+}) => {
   const roomDoc = await ContestRoom.findOne({ roomCode });
   if (!roomDoc) return null;
 
   roomDoc.status = status;
-  roomDoc.contestStartAt =
-    typeof contestStartAt === "number" ? new Date(contestStartAt) : null;
+  if (typeof contestStartAt === "number") {
+    roomDoc.contestStartAt = new Date(contestStartAt);
+  } else if (contestStartAt === null) {
+    roomDoc.contestStartAt = null;
+  }
+
+  if (typeof contestEndAt === "number") {
+    roomDoc.contestEndAt = new Date(contestEndAt);
+  } else if (contestEndAt === null) {
+    roomDoc.contestEndAt = null;
+  }
 
   if (status === "closed") {
     const now = new Date();
+    // Preserve timeline history when closing an already started contest.
+    if (roomDoc.contestStartAt && !roomDoc.contestEndAt) {
+      roomDoc.contestEndAt = now;
+    }
+
     for (const participant of roomDoc.participants) {
       participant.state = "left";
       participant.ready = false;
@@ -259,15 +364,18 @@ const setContestRoomStatus = async ({ roomCode, status, contestStartAt }) => {
   }
 
   await roomDoc.save();
+  await syncContestActiveState(roomDoc.contestId, status);
   return roomDoc;
 };
 
 const buildRoomMetaFromDoc = (roomDoc) => ({
   roomCode: roomDoc.roomCode,
+  contestId: roomDoc.contestId ? String(roomDoc.contestId) : null,
   hostUserId: roomDoc.hostUserId,
   hostName: roomDoc.hostName,
   status: roomDoc.status,
   contestStartAt: toMillis(roomDoc.contestStartAt),
+  contestEndAt: toMillis(roomDoc.contestEndAt),
   createdAt: roomDoc.createdAt
     ? new Date(roomDoc.createdAt).toISOString()
     : new Date().toISOString(),
@@ -276,7 +384,14 @@ const buildRoomMetaFromDoc = (roomDoc) => ({
 const syncRoomCacheFromDb = async (redis, roomCode) => {
   const roomDoc = await ContestRoom.findOne({ roomCode }).lean();
 
-  if (!roomDoc || !ACTIVE_ROOM_STATUSES.includes(roomDoc.status)) {
+  if (!roomDoc) {
+    await redis.del(roomMetaKey(roomCode), roomMembersKey(roomCode));
+    return null;
+  }
+
+  await syncContestActiveState(roomDoc.contestId, roomDoc.status);
+
+  if (!ACTIVE_ROOM_STATUSES.includes(roomDoc.status)) {
     await redis.del(roomMetaKey(roomCode), roomMembersKey(roomCode));
     return null;
   }
@@ -328,12 +443,27 @@ const getPersistedParticipant = (roomDoc, userId) =>
 const findUserActiveRoom = async (userId, excludeRoomCode = null) => {
   const query = {
     status: { $in: ACTIVE_ROOM_STATUSES },
-    participants: {
-      $elemMatch: {
-        userId,
-        state: { $in: Array.from(REJOIN_PARTICIPANT_STATES) },
+    $or: [
+      {
+        participants: {
+          $elemMatch: {
+            userId,
+            state: { $in: Array.from(REJOIN_PARTICIPANT_STATES) },
+          },
+        },
       },
-    },
+      {
+        hostUserId: userId,
+        participants: {
+          $not: {
+            $elemMatch: {
+              userId,
+              state: "left",
+            },
+          },
+        },
+      },
+    ],
   };
 
   if (excludeRoomCode) {
@@ -343,7 +473,109 @@ const findUserActiveRoom = async (userId, excludeRoomCode = null) => {
   return ContestRoom.findOne(query).select("roomCode status").lean();
 };
 
+const clearContestEndTimer = (roomCode) => {
+  const timer = contestEndTimers.get(roomCode);
+  if (!timer) return;
+  clearTimeout(timer);
+  contestEndTimers.delete(roomCode);
+};
+
+const endContestRoom = async ({
+  io,
+  redis,
+  roomCode,
+  message = "Contest time completed",
+}) => {
+  clearContestEndTimer(roomCode);
+
+  const roomMeta = await getRoomMetaOrHydrate(redis, roomCode);
+  if (!roomMeta || roomMeta.status !== "running") return false;
+
+  await setContestRoomStatus({
+    roomCode,
+    status: "ended",
+    contestEndAt: Date.now(),
+  });
+
+  const members = await getRoomMembers(redis, roomCode);
+  io.to(roomCode).emit("contest-ended", {
+    roomCode,
+    message,
+  });
+  io.in(roomCode).socketsLeave(roomCode);
+
+  if (members.length > 0) {
+    await deleteRoomState(redis, roomCode, members);
+  } else {
+    await redis.del(roomMetaKey(roomCode), roomMembersKey(roomCode));
+  }
+
+  await syncRoomCacheFromDb(redis, roomCode);
+  return true;
+};
+
+const scheduleContestEnd = ({ io, redis, roomCode, contestEndAt }) => {
+  if (typeof contestEndAt !== "number") return;
+
+  clearContestEndTimer(roomCode);
+
+  const delay = contestEndAt - Date.now();
+  if (delay <= 0) {
+    void endContestRoom({ io, redis, roomCode });
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    void endContestRoom({ io, redis, roomCode });
+  }, delay);
+  contestEndTimers.set(roomCode, timer);
+};
+
+const restoreRunningContestTimers = async (io, redis) => {
+  try {
+    const runningRooms = await ContestRoom.find({
+      status: "running",
+      contestEndAt: { $ne: null },
+    })
+      .select("roomCode contestId contestEndAt")
+      .lean();
+
+    for (const room of runningRooms) {
+      await syncContestActiveState(room.contestId, "running");
+      const contestEndAt = toMillis(room.contestEndAt);
+      if (!contestEndAt) continue;
+      scheduleContestEnd({
+        io,
+        redis,
+        roomCode: room.roomCode,
+        contestEndAt,
+      });
+    }
+  } catch (error) {
+    console.error("restore contest timers error:", error.message);
+  }
+};
+
+const reconcileContestActivityStates = async () => {
+  try {
+    const rooms = await ContestRoom.find({ contestId: { $ne: null } })
+      .select("contestId status")
+      .lean();
+
+    for (const room of rooms) {
+      await syncContestActiveState(room.contestId, room.status);
+    }
+  } catch (error) {
+    console.error("reconcile contest activity states error:", error.message);
+  }
+};
+
 export const initSocket = (io, redis) => {
+  void (async () => {
+    await reconcileContestActivityStates();
+    await restoreRunningContestTimers(io, redis);
+  })();
+
   io.use(async (socket, next) => {
     try {
       const token = getCookieValue(socket.handshake.headers.cookie || "", "token");
@@ -368,8 +600,9 @@ export const initSocket = (io, redis) => {
   io.on("connection", (socket) => {
     console.log(`[socket:connect] ${socket.id}`);
 
-    socket.on("create-room", async (_payload, ack) => {
+    socket.on("create-room", async (payload = {}, ack) => {
       let roomCode = "";
+      let contestId = null;
       try {
         if (socket.data.user?.role !== "admin") {
           return typeof ack === "function"
@@ -400,19 +633,51 @@ export const initSocket = (io, redis) => {
           roomCode = generateRoomCode();
         }
 
+        const selectedProblemIds = normalizeProblemIds(payload.problemIds);
+        if (selectedProblemIds.length === 0) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Select at least one problem"))
+            : undefined;
+        }
+
+        const selectedProblems = await Problem.find({
+          _id: { $in: selectedProblemIds },
+          isActive: true,
+        })
+          .select("_id")
+          .lean();
+
+        if (selectedProblems.length !== selectedProblemIds.length) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "One or more selected problems are invalid"))
+            : undefined;
+        }
+
+        const contest = await Contest.create({
+          title: normalizeContestTitle(payload.contestTitle, roomCode),
+          description: normalizeContestDescription(payload.contestDescription),
+          problems: selectedProblemIds,
+          duration: normalizeContestDuration(payload.duration),
+          createdBy: socket.data.user.id,
+        });
+        contestId = String(contest._id);
+
         const hostName = getSocketName(socket);
         const hostMember = toMember(socket, false);
         const roomMeta = {
           roomCode,
+          contestId,
           hostUserId: socket.data.user.id,
           hostName,
           status: "lobby",
           contestStartAt: null,
+          contestEndAt: null,
           createdAt: new Date().toISOString(),
         };
 
         await ContestRoom.create({
           roomCode,
+          contestId,
           hostUserId: roomMeta.hostUserId,
           hostName: roomMeta.hostName,
           status: roomMeta.status,
@@ -457,12 +722,16 @@ export const initSocket = (io, redis) => {
           ? ack(
               ok({
                 roomCode,
+                contestId: freshMeta?.contestId || roomMeta.contestId,
+                contestTitle: contest.title,
                 hostName: freshMeta?.hostName || hostName,
                 hostUserId: freshMeta?.hostUserId || roomMeta.hostUserId,
                 status: freshMeta?.status || roomMeta.status,
                 contestStartAt: freshMeta?.contestStartAt || roomMeta.contestStartAt,
+                contestEndAt: freshMeta?.contestEndAt || roomMeta.contestEndAt,
                 members,
                 allReady,
+                problemCount: selectedProblemIds.length,
               })
             )
           : undefined;
@@ -475,6 +744,9 @@ export const initSocket = (io, redis) => {
           } else {
             await redis.del(roomMetaKey(roomCode), roomMembersKey(roomCode));
           }
+        }
+        if (contestId) {
+          await Contest.findByIdAndDelete(contestId);
         }
 
         return typeof ack === "function"
@@ -499,6 +771,22 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
+        if (
+          roomMeta.status === "running" &&
+          typeof roomMeta.contestEndAt === "number" &&
+          roomMeta.contestEndAt <= Date.now()
+        ) {
+          await endContestRoom({
+            io,
+            redis,
+            roomCode,
+            message: "Contest time completed",
+          });
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest already ended"))
+            : undefined;
+        }
+
         const userId = socket.data.user.id;
         const alreadyActiveRoom = await findUserActiveRoom(userId, roomCode);
         if (alreadyActiveRoom) {
@@ -518,8 +806,9 @@ export const initSocket = (io, redis) => {
           .select("participants")
           .lean();
         const persistedParticipant = getPersistedParticipant(roomDoc, userId);
+        const isHost = roomMeta.hostUserId === userId;
 
-        if (roomMeta.status === "running" && !persistedParticipant) {
+        if (roomMeta.status === "running" && !persistedParticipant && !isHost) {
           return typeof ack === "function"
             ? ack(fail("FORBIDDEN", "Contest already started"))
             : undefined;
@@ -556,14 +845,28 @@ export const initSocket = (io, redis) => {
         const { members, allReady } = await emitRoomMembers(io, redis, roomCode);
         const syncedMeta = synced.roomMeta;
 
+        if (
+          syncedMeta.status === "running" &&
+          typeof syncedMeta.contestEndAt === "number"
+        ) {
+          scheduleContestEnd({
+            io,
+            redis,
+            roomCode,
+            contestEndAt: syncedMeta.contestEndAt,
+          });
+        }
+
         return typeof ack === "function"
           ? ack(
               ok({
                 roomCode,
+                contestId: syncedMeta.contestId || null,
                 hostName: syncedMeta.hostName,
                 hostUserId: syncedMeta.hostUserId,
                 status: syncedMeta.status,
                 contestStartAt: syncedMeta.contestStartAt || null,
+                contestEndAt: syncedMeta.contestEndAt || null,
                 members,
                 allReady,
               })
@@ -615,10 +918,12 @@ export const initSocket = (io, redis) => {
           ? ack(
               ok({
                 roomCode,
+                contestId: roomMeta.contestId || null,
                 hostName: roomMeta.hostName,
                 hostUserId: roomMeta.hostUserId,
                 status: roomMeta.status,
                 contestStartAt: roomMeta.contestStartAt || null,
+                contestEndAt: roomMeta.contestEndAt || null,
                 members,
                 allReady: computeAllReady(members),
               })
@@ -724,26 +1029,104 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
+        const roomDoc = await ContestRoom.findOne({ roomCode })
+          .select("contestId")
+          .lean();
+        if (!roomDoc?.contestId) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest is not mapped to this room"))
+            : undefined;
+        }
+
+        const contestDoc = await Contest.findById(roomDoc.contestId)
+          .select("duration")
+          .lean();
+        const durationMinutes = Number.isFinite(Number(contestDoc?.duration))
+          ? Math.max(5, Math.floor(Number(contestDoc.duration)))
+          : 90;
+
         const contestStartAt = Date.now() + CONTEST_COUNTDOWN_MS;
+        const contestEndAt = contestStartAt + durationMinutes * 60 * 1000;
         await setContestRoomStatus({
           roomCode,
           status: "running",
           contestStartAt,
+          contestEndAt,
         });
         await syncRoomCacheFromDb(redis, roomCode);
+        scheduleContestEnd({
+          io,
+          redis,
+          roomCode,
+          contestEndAt,
+        });
 
         io.to(roomCode).emit("contest-starting", {
           roomCode,
           contestStartAt,
+          contestEndAt,
+          durationMinutes,
         });
 
         return typeof ack === "function"
-          ? ack(ok({ roomCode, contestStartAt, status: "running" }))
+          ? ack(
+              ok({
+                roomCode,
+                contestStartAt,
+                contestEndAt,
+                durationMinutes,
+                status: "running",
+              })
+            )
           : undefined;
       } catch (error) {
         console.error("start-contest error:", error.message);
         return typeof ack === "function"
           ? ack(fail("INTERNAL_ERROR", "Could not start contest"))
+          : undefined;
+      }
+    });
+
+    socket.on("end-contest", async (payload = {}, ack) => {
+      try {
+        const roomCode = normalizeRoomCode(payload.roomCode || payload.roomId);
+        if (!roomCode) {
+          return typeof ack === "function"
+            ? ack(fail("BAD_REQUEST", "Room code is required"))
+            : undefined;
+        }
+
+        const roomMeta = await getRoomMetaOrHydrate(redis, roomCode);
+        if (!roomMeta) {
+          return typeof ack === "function"
+            ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        if (roomMeta.hostUserId !== socket.data.user.id) {
+          return typeof ack === "function"
+            ? ack(fail("FORBIDDEN", "Only host can end contest"))
+            : undefined;
+        }
+
+        if (roomMeta.status !== "running") {
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest is not running"))
+            : undefined;
+        }
+
+        await endContestRoom({
+          io,
+          redis,
+          roomCode,
+          message: "Contest ended by host",
+        });
+
+        return typeof ack === "function" ? ack(ok({ roomCode, status: "ended" })) : undefined;
+      } catch (error) {
+        console.error("end-contest error:", error.message);
+        return typeof ack === "function"
+          ? ack(fail("INTERNAL_ERROR", "Could not end contest"))
           : undefined;
       }
     });
@@ -826,8 +1209,8 @@ export const initSocket = (io, redis) => {
         await setContestRoomStatus({
           roomCode,
           status: "closed",
-          contestStartAt: null,
         });
+        clearContestEndTimer(roomCode);
 
         const members = await getRoomMembers(redis, roomCode);
         io.to(roomCode).emit("room-closed", {

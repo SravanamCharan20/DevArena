@@ -64,6 +64,16 @@ const LobbyClient = ({ roomCode }) => {
       if (!ack?.ok) {
         setError(ack?.message || "Could not join room");
         setMembers([]);
+        if (["NOT_FOUND", "BAD_STATE", "FORBIDDEN"].includes(ack?.code)) {
+          void refreshActiveRoom().then(() => {
+            router.replace("/dashboard");
+          });
+        }
+        return;
+      }
+
+      if (ack?.data?.status === "running") {
+        router.replace(`/arena?room=${roomCode}`);
         return;
       }
 

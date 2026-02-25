@@ -40,6 +40,12 @@ const JoinRoomPage = () => {
         return;
       }
 
+      const nextStatus = ack?.data?.status;
+      if (nextStatus === "running") {
+        router.push(`/arena?room=${nextRoomCode}`);
+        return;
+      }
+
       router.push(`/lobby?room=${nextRoomCode}`);
     });
   };
