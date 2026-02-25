@@ -23,7 +23,7 @@ import {
 
 dotenv.config();
 const PORT = process.env.PORT || 8888;
-const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || "https://devarena-lemon.vercel.app";
 const app = express();
 const server = http.createServer(app);
 let redisPubClient = null;
