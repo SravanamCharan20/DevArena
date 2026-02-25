@@ -116,6 +116,7 @@ const runDockerExecution = async ({
   command,
   stdin,
   timeoutMs,
+  memoryLimitMb,
   containerName,
 }) => {
   return new Promise((resolve) => {
@@ -129,7 +130,7 @@ const runDockerExecution = async ({
       "--cpus",
       "1",
       "--memory",
-      "256m",
+      `${memoryLimitMb}m`,
       "--pids-limit",
       "128",
       "--cap-drop",
@@ -216,6 +217,7 @@ export const executeCodeRun = async ({
   code,
   stdin = "",
   timeoutMs = 5000,
+  memoryLimitMb = 256,
 }) => {
   const config = LANGUAGE_CONFIG[language];
   if (!config) {
@@ -232,6 +234,9 @@ export const executeCodeRun = async ({
   await ensureImageReady(config.image);
 
   const startTime = Date.now();
+  const boundedMemoryLimitMb = Number.isFinite(Number(memoryLimitMb))
+    ? Math.max(64, Math.min(1024, Math.floor(Number(memoryLimitMb))))
+    : 256;
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "devarena-run-"));
   const containerName = `devarena-run-${randomUUID().slice(0, 12)}`;
 
@@ -245,6 +250,7 @@ export const executeCodeRun = async ({
       command: config.command,
       stdin,
       timeoutMs,
+      memoryLimitMb: boundedMemoryLimitMb,
       containerName,
     });
 
@@ -266,6 +272,26 @@ export const executeCodeRun = async ({
         verdict: "Compilation Error",
         stdout: result.stdout,
         stderr: result.stderr,
+        runtimeMs,
+        memoryKb: null,
+        timedOut: false,
+      };
+    }
+
+    const stderrText = String(result.stderr || "");
+    const stdoutText = String(result.stdout || "");
+    const combinedText = `${stderrText}\n${stdoutText}`.toLowerCase();
+    const looksLikeMemoryLimit =
+      result.exitCode === 137 ||
+      /memoryerror|std::bad_alloc|cannot allocate memory|out of memory|oom|killed/i.test(
+        combinedText
+      );
+
+    if (looksLikeMemoryLimit) {
+      return {
+        verdict: "Memory Limit Exceeded",
+        stdout: result.stdout,
+        stderr: result.stderr || "Memory limit exceeded",
         runtimeMs,
         memoryKb: null,
         timedOut: false,

@@ -11,6 +11,7 @@ import {
   MAX_RUN_INPUT_BYTES,
 } from "../services/judge/constants.js";
 import { enqueueJudgeJob } from "../services/judge/queue.js";
+import { validateCodePolicy } from "../services/judge/codePolicy.js";
 
 const ROOM_TTL_SECONDS = 60 * 60 * 6;
 const CONTEST_COUNTDOWN_MS = 3000;
@@ -1194,6 +1195,13 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
+        const policyCheck = validateCodePolicy({ language, code });
+        if (!policyCheck.ok) {
+          return typeof ack === "function"
+            ? ack(fail("POLICY_VIOLATION", policyCheck.message))
+            : undefined;
+        }
+
         const customInput = String(payload.customInput || payload.input || "");
         if (Buffer.byteLength(customInput, "utf8") > MAX_RUN_INPUT_BYTES) {
           return typeof ack === "function"
@@ -1238,7 +1246,7 @@ export const initSocket = (io, redis) => {
 
         const [contestDoc, problemDoc] = await Promise.all([
           Contest.findById(contestId).select("problems").lean(),
-          Problem.findById(problemId).select("isActive timeLimit").lean(),
+          Problem.findById(problemId).select("isActive timeLimit memoryLimit").lean(),
         ]);
 
         if (!contestDoc) {
@@ -1266,6 +1274,10 @@ export const initSocket = (io, redis) => {
         const timeoutMs = Number.isFinite(baseTimeLimit)
           ? Math.max(1200, Math.min(12000, Math.floor(baseTimeLimit * 3)))
           : 5000;
+        const baseMemoryLimit = Number(problemDoc.memoryLimit);
+        const memoryLimitMb = Number.isFinite(baseMemoryLimit)
+          ? Math.max(64, Math.min(1024, Math.floor(baseMemoryLimit)))
+          : 256;
         const requestId = String(payload.requestId || "").trim() || randomUUID();
 
         const job = await enqueueJudgeJob({
@@ -1280,6 +1292,7 @@ export const initSocket = (io, redis) => {
           code,
           customInput,
           timeoutMs,
+          memoryLimitMb,
           enqueuedAt: Date.now(),
         });
 
@@ -1336,6 +1349,13 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
+        const policyCheck = validateCodePolicy({ language, code });
+        if (!policyCheck.ok) {
+          return typeof ack === "function"
+            ? ack(fail("POLICY_VIOLATION", policyCheck.message))
+            : undefined;
+        }
+
         const roomMeta = await getRoomMetaOrHydrate(redis, roomCode);
         if (!roomMeta) {
           return typeof ack === "function"
@@ -1374,7 +1394,7 @@ export const initSocket = (io, redis) => {
         const [contestDoc, problemDoc] = await Promise.all([
           Contest.findById(contestId).select("problems").lean(),
           Problem.findById(problemId)
-            .select("isActive timeLimit credit hiddenTestcases")
+            .select("isActive timeLimit memoryLimit credit hiddenTestcases")
             .lean(),
         ]);
 
@@ -1412,6 +1432,10 @@ export const initSocket = (io, redis) => {
         const timeoutMs = Number.isFinite(baseTimeLimit)
           ? Math.max(1200, Math.min(12000, Math.floor(baseTimeLimit * 3)))
           : 5000;
+        const baseMemoryLimit = Number(problemDoc.memoryLimit);
+        const memoryLimitMb = Number.isFinite(baseMemoryLimit)
+          ? Math.max(64, Math.min(1024, Math.floor(baseMemoryLimit)))
+          : 256;
         const requestId = String(payload.requestId || "").trim() || randomUUID();
 
         const job = await enqueueJudgeJob({
@@ -1426,6 +1450,7 @@ export const initSocket = (io, redis) => {
           code,
           customInput: "",
           timeoutMs,
+          memoryLimitMb,
           problemCredit: Number.isFinite(Number(problemDoc.credit))
             ? Number(problemDoc.credit)
             : 100,

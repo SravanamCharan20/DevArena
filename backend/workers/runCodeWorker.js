@@ -4,6 +4,7 @@ import IORedis from "ioredis";
 import { executeCodeRun } from "../services/judge/dockerRunner.js";
 import { evaluateSubmissionAgainstTestcases } from "../services/judge/evaluator.js";
 import { RUN_CODE_JOB_NAME, RUN_CODE_QUEUE_NAME } from "../services/judge/constants.js";
+import { validateCodePolicy } from "../services/judge/codePolicy.js";
 
 dotenv.config();
 
@@ -33,22 +34,59 @@ const worker = new Worker(
     const timeoutMs = Number.isFinite(Number(job.data?.timeoutMs))
       ? Number(job.data.timeoutMs)
       : 5000;
+    const memoryLimitMb = Number.isFinite(Number(job.data?.memoryLimitMb))
+      ? Number(job.data.memoryLimitMb)
+      : 256;
+    const language = String(job.data?.language || "");
+    const code = String(job.data?.code || "");
+
+    const policyCheck = validateCodePolicy({ language, code });
+    if (!policyCheck.ok) {
+      return {
+        type: jobType,
+        requestId: String(job.data?.requestId || ""),
+        roomCode: String(job.data?.roomCode || ""),
+        contestId: String(job.data?.contestId || ""),
+        problemId: String(job.data?.problemId || ""),
+        userId: String(job.data?.userId || ""),
+        username: String(job.data?.username || ""),
+        language,
+        code,
+        customInput: String(job.data?.customInput || ""),
+        problemCredit: Number.isFinite(Number(job.data?.problemCredit))
+          ? Number(job.data.problemCredit)
+          : 100,
+        verdict: "Runtime Error",
+        stdout: "",
+        stderr: policyCheck.message,
+        runtimeMs: 0,
+        memoryKb: null,
+        timedOut: false,
+        testcasesPassed: 0,
+        testcasesTotal: Array.isArray(job.data?.judgeTestcases)
+          ? job.data.judgeTestcases.length
+          : 0,
+        completedAt: Date.now(),
+      };
+    }
 
     const result =
       jobType === "submit"
         ? await evaluateSubmissionAgainstTestcases({
-            language: String(job.data?.language || ""),
-            code: String(job.data?.code || ""),
+            language,
+            code,
             testcases: Array.isArray(job.data?.judgeTestcases)
               ? job.data.judgeTestcases
               : [],
             timeoutMs,
+            memoryLimitMb,
           })
         : await executeCodeRun({
-            language: String(job.data?.language || ""),
-            code: String(job.data?.code || ""),
+            language,
+            code,
             stdin: String(job.data?.customInput || ""),
             timeoutMs,
+            memoryLimitMb,
           });
 
     return {
@@ -59,8 +97,8 @@ const worker = new Worker(
       problemId: String(job.data?.problemId || ""),
       userId: String(job.data?.userId || ""),
       username: String(job.data?.username || ""),
-      language: String(job.data?.language || ""),
-      code: String(job.data?.code || ""),
+      language,
+      code,
       customInput: String(job.data?.customInput || ""),
       problemCredit: Number.isFinite(Number(job.data?.problemCredit))
         ? Number(job.data.problemCredit)

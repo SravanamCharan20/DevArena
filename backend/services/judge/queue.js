@@ -130,6 +130,9 @@ const rejudgeSubmitPayload = async (job, payload) => {
   const timeoutMs = Number.isFinite(Number(job?.data?.timeoutMs))
     ? Number(job.data.timeoutMs)
     : 5000;
+  const memoryLimitMb = Number.isFinite(Number(job?.data?.memoryLimitMb))
+    ? Number(job.data.memoryLimitMb)
+    : 256;
 
   if (judgeTestcases.length === 0) return payload;
 
@@ -138,6 +141,7 @@ const rejudgeSubmitPayload = async (job, payload) => {
     code: String(job?.data?.code || payload.code || ""),
     testcases: judgeTestcases,
     timeoutMs,
+    memoryLimitMb,
   });
 
   return {

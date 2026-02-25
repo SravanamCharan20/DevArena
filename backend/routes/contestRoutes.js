@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Contest from "../models/Contest.js";
 import ContestRoom from "../models/ContestRoom.js";
 import Problem from "../models/Problem.js";
+import Submission from "../models/Submission.js";
 import { authorizeRoles, requireAuth } from "../middlewares/auth.js";
 
 const ACTIVE_ROOM_STATUSES = ["lobby", "running"];
@@ -37,6 +38,19 @@ const toMillis = (value) => {
 };
 
 const isActiveRoomStatus = (status) => ACTIVE_ROOM_STATUSES.includes(status);
+
+const getAuthorizedRoomForUser = async ({
+  roomCode,
+  userId,
+  select = "_id roomCode contestId status hostUserId hostName participants",
+}) => {
+  return ContestRoom.findOne({
+    roomCode,
+    $or: [{ hostUserId: userId }, { participants: { $elemMatch: { userId } } }],
+  })
+    .select(select)
+    .lean();
+};
 
 const syncContestActiveStateByRoom = async ({
   contestId,
@@ -462,6 +476,181 @@ contestRouter.get("/rooms/:roomCode/contest", requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error("get room contest error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+contestRouter.get("/rooms/:roomCode/leaderboard", requireAuth, async (req, res) => {
+  try {
+    const roomCode = normalizeRoomCode(req.params.roomCode);
+    if (!roomCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Room code is required",
+      });
+    }
+
+    const userId = String(req.user._id);
+    const room = await getAuthorizedRoomForUser({
+      roomCode,
+      userId,
+      select: "roomCode contestId status hostUserId hostName participants",
+    });
+
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Room not found",
+      });
+    }
+
+    const members = (Array.isArray(room.participants) ? room.participants : [])
+      .map((participant) => ({
+        userId: participant.userId,
+        username: participant.username,
+        state: participant.state || "active",
+        ready: participant.ready === true,
+        score: Number.isFinite(Number(participant.score)) ? Number(participant.score) : 0,
+        penalty: Number.isFinite(Number(participant.penalty))
+          ? Number(participant.penalty)
+          : 0,
+        solvedCount: Number.isFinite(Number(participant.solvedCount))
+          ? Number(participant.solvedCount)
+          : 0,
+        solvedProblemIds: Array.isArray(participant.solvedProblemIds)
+          ? participant.solvedProblemIds.map((item) => String(item))
+          : [],
+        joinedAt: participant.joinedAt ? new Date(participant.joinedAt).getTime() : null,
+        lastSeenAt: participant.lastSeenAt
+          ? new Date(participant.lastSeenAt).getTime()
+          : null,
+      }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (a.penalty !== b.penalty) return a.penalty - b.penalty;
+        return String(a.username || "").localeCompare(String(b.username || ""));
+      });
+
+    return res.status(200).json({
+      success: true,
+      room: {
+        roomCode: room.roomCode,
+        status: room.status,
+        hostUserId: room.hostUserId,
+        hostName: room.hostName,
+        contestId: room.contestId ? String(room.contestId) : null,
+      },
+      members,
+      updatedAt: Date.now(),
+    });
+  } catch (error) {
+    console.error("get room leaderboard error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+contestRouter.get("/rooms/:roomCode/submissions", requireAuth, async (req, res) => {
+  try {
+    const roomCode = normalizeRoomCode(req.params.roomCode);
+    if (!roomCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Room code is required",
+      });
+    }
+
+    const userId = String(req.user._id);
+    const room = await getAuthorizedRoomForUser({
+      roomCode,
+      userId,
+      select: "roomCode contestId status hostUserId participants.userId",
+    });
+
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Room not found",
+      });
+    }
+
+    const query = {
+      roomCode,
+      submissionType: "submit",
+    };
+
+    const problemId = String(req.query.problemId || "").trim();
+    if (problemId) {
+      if (!mongoose.Types.ObjectId.isValid(problemId)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid problem id",
+        });
+      }
+      query.problemId = problemId;
+    }
+
+    if (room.contestId && mongoose.Types.ObjectId.isValid(String(room.contestId))) {
+      query.contestId = room.contestId;
+    }
+
+    const rawLimit = Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(100, Math.floor(rawLimit)))
+      : 50;
+
+    const submissions = await Submission.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .select(
+        "requestId userId username problemId verdict status language executionTime memoryUsed testcasesPassed testcasesTotal scoreDelta penaltyDelta createdAt judgedAt"
+      )
+      .lean();
+
+    const normalizedSubmissions = submissions.map((item) => ({
+      _id: String(item._id),
+      requestId: String(item.requestId || ""),
+      roomCode,
+      contestId: item.contestId ? String(item.contestId) : null,
+      problemId: item.problemId ? String(item.problemId) : null,
+      userId: String(item.userId || ""),
+      username: String(item.username || ""),
+      verdict: String(item.verdict || "Pending"),
+      status: String(item.status || "done"),
+      language: String(item.language || ""),
+      executionTime: Number.isFinite(Number(item.executionTime))
+        ? Number(item.executionTime)
+        : null,
+      memoryUsed: Number.isFinite(Number(item.memoryUsed)) ? Number(item.memoryUsed) : null,
+      testcasesPassed: Number.isFinite(Number(item.testcasesPassed))
+        ? Number(item.testcasesPassed)
+        : 0,
+      testcasesTotal: Number.isFinite(Number(item.testcasesTotal))
+        ? Number(item.testcasesTotal)
+        : 0,
+      scoreDelta: Number.isFinite(Number(item.scoreDelta)) ? Number(item.scoreDelta) : 0,
+      penaltyDelta: Number.isFinite(Number(item.penaltyDelta)) ? Number(item.penaltyDelta) : 0,
+      createdAt: item.createdAt ? new Date(item.createdAt).getTime() : null,
+      judgedAt: item.judgedAt ? new Date(item.judgedAt).getTime() : null,
+    }));
+
+    return res.status(200).json({
+      success: true,
+      room: {
+        roomCode: room.roomCode,
+        status: room.status,
+        contestId: room.contestId ? String(room.contestId) : null,
+      },
+      count: normalizedSubmissions.length,
+      submissions: normalizedSubmissions,
+    });
+  } catch (error) {
+    console.error("get room submissions error:", error.message);
     return res.status(500).json({
       success: false,
       message: "Internal Server Error",

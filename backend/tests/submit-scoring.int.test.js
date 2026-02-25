@@ -249,3 +249,32 @@ test("Invalid judge metadata (testcasesTotal <= 0) is rejected with no scoring",
   assert.equal(resultEvent.payload.ok, false);
   assert.equal(resultEvent.payload.code, "BAD_STATE");
 });
+
+test("Duplicate same requestId is idempotent and does not apply penalty twice", async () => {
+  const contestId = await createRoom();
+  const io = makeIoSpy();
+  const duplicateRequestId = new mongoose.Types.ObjectId().toString();
+  const payload = basePayload({
+    contestId,
+    requestId: duplicateRequestId,
+    verdict: "Wrong Answer",
+    testcasesPassed: 0,
+    testcasesTotal: 4,
+  });
+
+  await finalizeSubmitJob({ io, payload });
+  await finalizeSubmitJob({ io, payload });
+
+  const room = await ContestRoom.findOne({ roomCode: payload.roomCode }).lean();
+  const participant = room.participants.find((item) => item.userId === "u1");
+  assert.equal(participant.score, 0);
+  assert.equal(participant.penalty, 10);
+
+  const submissions = await Submission.find({
+    requestId: duplicateRequestId,
+    submissionType: "submit",
+  }).lean();
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].penaltyDelta, 10);
+  assert.equal(submissions[0].verdict, "Wrong Answer");
+});

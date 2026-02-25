@@ -76,4 +76,22 @@ submissionSchema.index({
   createdAt: -1,
 });
 
+// Idempotency key for submit retries: same logical request should be processed once.
+submissionSchema.index(
+  {
+    roomCode: 1,
+    userId: 1,
+    problemId: 1,
+    submissionType: 1,
+    requestId: 1,
+  },
+  {
+    unique: true,
+    partialFilterExpression: {
+      submissionType: "submit",
+      requestId: { $exists: true, $type: "string" },
+    },
+  }
+);
+
 export default mongoose.model("Submission", submissionSchema);

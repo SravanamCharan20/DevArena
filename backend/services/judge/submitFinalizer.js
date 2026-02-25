@@ -29,7 +29,36 @@ const sortLeaderboardMembers = (members) =>
     return String(a.username || "").localeCompare(String(b.username || ""));
   });
 
-export const recordSubmission = async ({
+const duplicateKeyError = (error) => Number(error?.code) === 11000;
+
+const submitIdempotencyFilter = ({
+  submissionType,
+  requestId,
+  roomCode,
+  userId,
+  problemId,
+}) => {
+  if (submissionType !== "submit") return null;
+
+  const normalizedRequestId = String(requestId || "").trim();
+  const normalizedRoomCode = String(roomCode || "").trim();
+  const normalizedUserId = String(userId || "").trim();
+  const normalizedProblemId = String(problemId || "").trim();
+
+  if (!normalizedRequestId || !normalizedRoomCode || !normalizedUserId || !normalizedProblemId) {
+    return null;
+  }
+
+  return {
+    submissionType: "submit",
+    requestId: normalizedRequestId,
+    roomCode: normalizedRoomCode,
+    userId: normalizedUserId,
+    problemId: normalizedProblemId,
+  };
+};
+
+const buildSubmissionDoc = ({
   status,
   requestId,
   submissionType,
@@ -50,30 +79,202 @@ export const recordSubmission = async ({
   testcasesTotal,
   scoreDelta,
   penaltyDelta,
-}) => {
-  await Submission.create({
-    status,
-    requestId,
-    submissionType,
-    userId,
-    username,
-    problemId,
-    contestId,
+}) => ({
+  status,
+  requestId,
+  submissionType,
+  userId,
+  username,
+  problemId,
+  contestId,
+  roomCode,
+  code,
+  language,
+  customInput,
+  verdict,
+  executionTime,
+  memoryUsed,
+  stdout,
+  stderr,
+  testcasesPassed,
+  testcasesTotal,
+  scoreDelta,
+  penaltyDelta,
+  judgedAt: new Date(),
+});
+
+const emitLeaderboardSnapshot = async ({ io, roomCode }) => {
+  const roomDoc = await ContestRoom.findOne({ roomCode }).lean();
+  if (!roomDoc) return;
+
+  const leaderboardMembers = sortLeaderboardMembers(
+    (Array.isArray(roomDoc.participants) ? roomDoc.participants : [])
+      .filter((item) => ["active", "disconnected"].includes(item.state || "active"))
+      .map(toLeaderboardMember)
+  );
+
+  io.to(roomCode).emit("leaderboard-updated", {
     roomCode,
-    code,
-    language,
-    customInput,
-    verdict,
-    executionTime,
-    memoryUsed,
-    stdout,
-    stderr,
-    testcasesPassed,
-    testcasesTotal,
-    scoreDelta,
-    penaltyDelta,
-    judgedAt: new Date(),
+    members: leaderboardMembers,
+    updatedAt: Date.now(),
   });
+};
+
+const emitSubmissionFromStoredRecord = async ({ io, storedSubmission }) => {
+  if (!storedSubmission) return;
+
+  const submission =
+    typeof storedSubmission.toObject === "function"
+      ? storedSubmission.toObject()
+      : storedSubmission;
+
+  const payloadData = {
+    requestId: String(submission.requestId || ""),
+    roomCode: String(submission.roomCode || ""),
+    contestId: String(submission.contestId || ""),
+    problemId: String(submission.problemId || ""),
+    userId: String(submission.userId || ""),
+    username: String(submission.username || ""),
+    language: String(submission.language || ""),
+    code: String(submission.code || ""),
+    customInput: String(submission.customInput || ""),
+    verdict: String(submission.verdict || "Pending"),
+    stdout: String(submission.stdout || ""),
+    stderr: String(submission.stderr || ""),
+    runtimeMs: Number.isFinite(Number(submission.executionTime))
+      ? Number(submission.executionTime)
+      : null,
+    memoryKb: Number.isFinite(Number(submission.memoryUsed))
+      ? Number(submission.memoryUsed)
+      : null,
+    testcasesPassed: Number.isFinite(Number(submission.testcasesPassed))
+      ? Number(submission.testcasesPassed)
+      : 0,
+    testcasesTotal: Number.isFinite(Number(submission.testcasesTotal))
+      ? Number(submission.testcasesTotal)
+      : 0,
+    scoreDelta: Number.isFinite(Number(submission.scoreDelta))
+      ? Number(submission.scoreDelta)
+      : 0,
+    penaltyDelta: Number.isFinite(Number(submission.penaltyDelta))
+      ? Number(submission.penaltyDelta)
+      : 0,
+    solvedNow: Number.isFinite(Number(submission.scoreDelta))
+      ? Number(submission.scoreDelta) > 0
+      : false,
+    completedAt: submission.judgedAt ? new Date(submission.judgedAt).getTime() : Date.now(),
+  };
+
+  if (submission.status === "done") {
+    io.to(`user:${submission.userId}`).emit("submission-result", {
+      ok: true,
+      data: payloadData,
+      duplicate: true,
+    });
+    await emitLeaderboardSnapshot({ io, roomCode: payloadData.roomCode });
+    return;
+  }
+
+  if (submission.status === "judging" || submission.status === "queued") {
+    io.to(`user:${submission.userId}`).emit("submission-result", {
+      ok: false,
+      code: "DUPLICATE_REQUEST",
+      message: "Submission already in progress.",
+      data: payloadData,
+      duplicate: true,
+    });
+    return;
+  }
+
+  io.to(`user:${submission.userId}`).emit("submission-result", {
+    ok: false,
+    code: "DUPLICATE_REQUEST",
+    message: "Submission already processed.",
+    data: payloadData,
+    duplicate: true,
+  });
+};
+
+export const recordSubmission = async (submissionInput) => {
+  const doc = buildSubmissionDoc(submissionInput);
+  const dedupeFilter = submitIdempotencyFilter(submissionInput);
+
+  try {
+    return await Submission.create(doc);
+  } catch (error) {
+    if (!duplicateKeyError(error) || !dedupeFilter) throw error;
+
+    const existing = await Submission.findOne(dedupeFilter);
+    if (!existing) throw error;
+
+    if (existing.status === "judging" && submissionInput.status !== "judging") {
+      existing.set(doc);
+      await existing.save();
+    }
+
+    return existing;
+  }
+};
+
+const reserveSubmitRequest = async (payload) => {
+  const reservationInput = {
+    status: "judging",
+    requestId: payload.requestId,
+    submissionType: "submit",
+    userId: payload.userId,
+    username: payload.username,
+    problemId: payload.problemId,
+    contestId: payload.contestId,
+    roomCode: payload.roomCode,
+    code: payload.code,
+    language: payload.language,
+    customInput: payload.customInput || "",
+    verdict: "Pending",
+    executionTime: null,
+    memoryUsed: null,
+    stdout: "",
+    stderr: "",
+    testcasesPassed: 0,
+    testcasesTotal: Number.isFinite(Number(payload.testcasesTotal))
+      ? Number(payload.testcasesTotal)
+      : 0,
+    scoreDelta: 0,
+    penaltyDelta: 0,
+  };
+
+  const dedupeFilter = submitIdempotencyFilter(reservationInput);
+
+  if (!dedupeFilter) {
+    const created = await recordSubmission(reservationInput);
+    return { reserved: true, submission: created };
+  }
+
+  const existing = await Submission.findOne(dedupeFilter);
+  if (existing) {
+    return { reserved: false, submission: existing };
+  }
+
+  try {
+    const created = await Submission.create(buildSubmissionDoc(reservationInput));
+    return { reserved: true, submission: created };
+  } catch (error) {
+    if (!duplicateKeyError(error)) throw error;
+    const duplicateDoc = await Submission.findOne(dedupeFilter);
+    return { reserved: false, submission: duplicateDoc };
+  }
+};
+
+const updateReservedSubmission = async (submissionId, fields) => {
+  return Submission.findByIdAndUpdate(
+    submissionId,
+    {
+      $set: {
+        ...fields,
+        judgedAt: new Date(),
+      },
+    },
+    { returnDocument: "after" }
+  );
 };
 
 export const finalizeSubmitJob = async ({ io, payload }) => {
@@ -87,20 +288,22 @@ export const finalizeSubmitJob = async ({ io, payload }) => {
     ? Math.max(0, Math.floor(Number(payload.testcasesPassed)))
     : 0;
 
+  const reservation = await reserveSubmitRequest({
+    ...payload,
+    testcasesTotal,
+  });
+
+  if (!reservation.reserved) {
+    await emitSubmissionFromStoredRecord({ io, storedSubmission: reservation.submission });
+    return;
+  }
+
+  const reservedSubmissionId = reservation.submission._id;
+
   const roomDoc = await ContestRoom.findOne({ roomCode });
   if (!roomDoc) {
-    await recordSubmission({
+    await updateReservedSubmission(reservedSubmissionId, {
       status: "failed",
-      requestId: payload.requestId,
-      submissionType: "submit",
-      userId,
-      username: payload.username,
-      problemId,
-      contestId: payload.contestId,
-      roomCode,
-      code: payload.code,
-      language: payload.language,
-      customInput: payload.customInput,
       verdict: payload.verdict,
       executionTime: payload.runtimeMs,
       memoryUsed: payload.memoryKb,
@@ -122,18 +325,8 @@ export const finalizeSubmitJob = async ({ io, payload }) => {
 
   const participant = roomDoc.participants.find((item) => item.userId === userId);
   if (!participant) {
-    await recordSubmission({
+    await updateReservedSubmission(reservedSubmissionId, {
       status: "failed",
-      requestId: payload.requestId,
-      submissionType: "submit",
-      userId,
-      username: payload.username,
-      problemId,
-      contestId: payload.contestId,
-      roomCode,
-      code: payload.code,
-      language: payload.language,
-      customInput: payload.customInput,
       verdict: payload.verdict,
       executionTime: payload.runtimeMs,
       memoryUsed: payload.memoryKb,
@@ -154,18 +347,8 @@ export const finalizeSubmitJob = async ({ io, payload }) => {
   }
 
   if (!scoreableRoomStatuses.has(String(roomDoc.status || ""))) {
-    await recordSubmission({
+    await updateReservedSubmission(reservedSubmissionId, {
       status: "failed",
-      requestId: payload.requestId,
-      submissionType: "submit",
-      userId,
-      username: payload.username,
-      problemId,
-      contestId: payload.contestId,
-      roomCode,
-      code: payload.code,
-      language: payload.language,
-      customInput: payload.customInput,
       verdict: payload.verdict,
       executionTime: payload.runtimeMs,
       memoryUsed: payload.memoryKb,
@@ -186,18 +369,8 @@ export const finalizeSubmitJob = async ({ io, payload }) => {
   }
 
   if (testcasesTotal <= 0) {
-    await recordSubmission({
+    await updateReservedSubmission(reservedSubmissionId, {
       status: "failed",
-      requestId: payload.requestId,
-      submissionType: "submit",
-      userId,
-      username: payload.username,
-      problemId,
-      contestId: payload.contestId,
-      roomCode,
-      code: payload.code,
-      language: payload.language,
-      customInput: payload.customInput,
       verdict: payload.verdict,
       executionTime: payload.runtimeMs,
       memoryUsed: payload.memoryKb,
@@ -267,18 +440,8 @@ export const finalizeSubmitJob = async ({ io, payload }) => {
   participant.lastSeenAt = new Date();
   await roomDoc.save();
 
-  await recordSubmission({
+  await updateReservedSubmission(reservedSubmissionId, {
     status: "done",
-    requestId: payload.requestId,
-    submissionType: "submit",
-    userId,
-    username: payload.username,
-    problemId,
-    contestId: payload.contestId,
-    roomCode,
-    code: payload.code,
-    language: payload.language,
-    customInput: payload.customInput,
     verdict: effectiveVerdict,
     executionTime: payload.runtimeMs,
     memoryUsed: payload.memoryKb,

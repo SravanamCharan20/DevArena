@@ -12,6 +12,7 @@ export const evaluateSubmissionAgainstTestcases = async ({
   code,
   testcases,
   timeoutMs,
+  memoryLimitMb,
 }) => {
   const cases = Array.isArray(testcases) ? testcases : [];
   const total = cases.length;
@@ -39,6 +40,7 @@ export const evaluateSubmissionAgainstTestcases = async ({
       code,
       stdin: String(testcase?.input || ""),
       timeoutMs,
+      memoryLimitMb,
     });
 
     cumulativeRuntimeMs += Number.isFinite(Number(result.runtimeMs))
@@ -91,4 +93,3 @@ export const evaluateSubmissionAgainstTestcases = async ({
     testcasesTotal: total,
   };
 };
-
