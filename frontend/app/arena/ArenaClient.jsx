@@ -1,11 +1,42 @@
 "use client";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import SurfaceCard from "../components/ui/SurfaceCard";
-import StatusMessage from "../components/ui/StatusMessage";
 import { useSocket } from "../utils/SocketProvider";
+import { useTheme } from "../utils/ThemeProvider";
 import { useUser } from "../utils/UserContext";
 import { API_BASE_URL } from "../utils/config";
+
+const MonacoEditor = dynamic(() => import("@monaco-editor/react"), {
+  ssr: false,
+  loading: () => (
+    <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
+      Loading editor...
+    </div>
+  ),
+});
+
+const DEFAULT_SNIPPETS = {
+  python: `# Write your solution here
+def solve():
+    pass`,
+  javascript: `// Write your solution here
+function solve() {
+  
+}`,
+  cpp: `#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+  return 0;
+}`,
+};
+
+const LANGUAGE_TO_MONACO = {
+  python: "python",
+  javascript: "javascript",
+  cpp: "cpp",
+};
 
 const formatDuration = (ms) => {
   const safeMs = Number.isFinite(ms) ? Math.max(0, ms) : 0;
@@ -23,13 +54,10 @@ const formatDuration = (ms) => {
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 };
 
-const DEFAULT_EDITOR_CODE = `# Write your solution here
-def solve():
-    pass`;
-
 const ArenaClient = ({ roomCode }) => {
   const router = useRouter();
   const { socket, connected } = useSocket();
+  const { resolvedTheme } = useTheme();
   const { user, refreshActiveRoom } = useUser();
   const invalidRoomCode = !roomCode;
 
@@ -38,24 +66,26 @@ const ArenaClient = ({ roomCode }) => {
   const [contestLoading, setContestLoading] = useState(true);
   const [contest, setContest] = useState(null);
   const [selectedProblemId, setSelectedProblemId] = useState("");
+  const [problemTab, setProblemTab] = useState("description");
   const [members, setMembers] = useState([]);
   const [leaderboardOpen, setLeaderboardOpen] = useState(false);
   const [contestEndAt, setContestEndAt] = useState(null);
   const [timeLeftMs, setTimeLeftMs] = useState(null);
 
   const [language, setLanguage] = useState("python");
-  const [code, setCode] = useState(DEFAULT_EDITOR_CODE);
+  const [codeByLanguage, setCodeByLanguage] = useState(DEFAULT_SNIPPETS);
   const [customInput, setCustomInput] = useState("");
   const [runOutput, setRunOutput] = useState("");
   const [runStatus, setRunStatus] = useState("");
+  const [consoleTab, setConsoleTab] = useState("testcase");
 
   const [leaving, setLeaving] = useState(false);
   const [closing, setClosing] = useState(false);
   const [endingContest, setEndingContest] = useState(false);
 
   const contestEndRequestedRef = useRef(false);
-
   const isHost = Boolean(user?._id && hostUserId && user._id === hostUserId);
+  const activeCode = codeByLanguage[language] || "";
 
   const selectedProblem = useMemo(() => {
     if (!contest?.problems?.length) return null;
@@ -217,6 +247,7 @@ const ArenaClient = ({ roomCode }) => {
     if (!selectedProblem) {
       setRunStatus("No problem selected");
       setRunOutput("");
+      setConsoleTab("result");
       return;
     }
 
@@ -229,17 +260,20 @@ const ArenaClient = ({ roomCode }) => {
       setRunOutput(
         `Input:\n${customInput || example.input}\n\nOutput:\n${example.output}\n\nNote: Judge integration pending.`
       );
+      setConsoleTab("result");
       return;
     }
 
     setRunStatus("Run completed");
     setRunOutput("Judge integration pending. Configure executor to run code.");
+    setConsoleTab("result");
   };
 
   const handleResetRunner = () => {
     setCustomInput("");
     setRunStatus("");
     setRunOutput("");
+    setConsoleTab("testcase");
   };
 
   const handleLeaveArena = () => {
@@ -290,186 +324,203 @@ const ArenaClient = ({ roomCode }) => {
     timeLeftMs === null ? "--:--" : formatDuration(timeLeftMs >= 0 ? timeLeftMs : 0);
 
   return (
-    <div className="page-wrap">
-      <div className="content-grid">
-        <SurfaceCard className="p-5 sm:p-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="chip">Contest running</p>
-              <h1 className="section-title mt-3">DevArena</h1>
-              <p className="body-muted mt-2 text-sm">
-                {contest?.title || "Contest is live"}
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={() => setLeaderboardOpen((prev) => !prev)}
-                className="chip cursor-pointer"
-              >
-                Leaderboard
-              </button>
-              <span className="chip">Time Left {timerText}</span>
-              <span className="chip">Room {roomCode || "N/A"}</span>
-            </div>
+    <div className="mx-auto w-[min(1800px,98vw)] py-3">
+      <div className="mb-3 rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] px-4 py-3 shadow-[var(--shadow-md)]">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <span className="inline-flex rounded-full border border-[var(--border)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              Contest Running
+            </span>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--text)]">
+              {contest?.title || "DevArena"}
+            </h1>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              Room {roomCode || "N/A"} · {isHost ? "Host" : "Participant"}
+            </p>
           </div>
 
-          {leaderboardOpen ? (
-            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--surface-soft)] p-3">
-              <h3 className="text-sm font-semibold">Live leaderboard</h3>
-              {sortedLeaderboard.length === 0 ? (
-                <p className="status status-info mt-2">No members yet.</p>
-              ) : (
-                <ol className="mt-2 space-y-1.5">
-                  {sortedLeaderboard.map((member, index) => (
-                    <li
-                      key={member.userId}
-                      className="flex items-center justify-between rounded-md border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-1.5 text-sm"
-                    >
-                      <span>
-                        {index + 1}. {member.username}
-                      </span>
-                      <span>{Number.isFinite(Number(member?.score)) ? member.score : 0}</span>
-                    </li>
-                  ))}
-                </ol>
-              )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setLeaderboardOpen((prev) => !prev)}
+              className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] transition-all ${
+                leaderboardOpen
+                  ? "border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)]"
+                  : "border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:border-[var(--border-strong)] hover:text-[var(--text)]"
+              }`}
+            >
+              Leaderboard
+            </button>
+            <span className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+              Time Left {timerText}
+            </span>
+          </div>
+        </div>
+
+        {leaderboardOpen ? (
+          <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3">
+            <div className="mb-2 flex items-center justify-between text-xs text-[var(--text-muted)]">
+              <p className="font-semibold text-[var(--text)]">Live Leaderboard</p>
+              <span>{sortedLeaderboard.length} members</span>
             </div>
-          ) : null}
-
-          {!connected ? (
-            <StatusMessage variant="warn" role="status" className="mt-4">
-              Reconnecting to live server...
-            </StatusMessage>
-          ) : null}
-
-          {endingContest ? (
-            <StatusMessage variant="warn" role="status" className="mt-3">
-              Ending contest...
-            </StatusMessage>
-          ) : null}
-
-          <StatusMessage variant="error" role="alert" className="mt-3">
-            {error}
-          </StatusMessage>
-        </SurfaceCard>
-
-        <div className="content-grid lg:grid-cols-[1fr_0.65fr_1fr]">
-          <SurfaceCard className="min-h-[560px] p-6 sm:p-7">
-            <h2 className="text-lg font-semibold">Problem</h2>
-            {contestLoading ? (
-              <p className="status status-info mt-3">Loading problem...</p>
-            ) : !selectedProblem ? (
-              <p className="status status-info mt-3">No problem mapped to this contest.</p>
+            {sortedLeaderboard.length === 0 ? (
+              <p className="text-sm text-[var(--text-muted)]">No members yet.</p>
             ) : (
-              <div className="mt-4 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-xl font-semibold">{selectedProblem.title}</h3>
-                  <span className="chip">{selectedProblem.difficulty}</span>
+              <ol className="grid gap-1.5">
+                {sortedLeaderboard.map((member, index) => (
+                  <li
+                    key={member.userId}
+                    className="flex items-center justify-between rounded-lg border border-[var(--border)] bg-[var(--surface-strong)] px-3 py-2 text-sm"
+                  >
+                    <span className="text-[var(--text)]">
+                      {index + 1}. {member.username}
+                    </span>
+                    <span className="font-semibold text-[var(--text)]">
+                      {Number.isFinite(Number(member?.score)) ? member.score : 0}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        ) : null}
+
+        {!connected ? (
+          <p className="mt-3 text-sm text-amber-400">Reconnecting to live server...</p>
+        ) : null}
+        {endingContest ? (
+          <p className="mt-2 text-sm text-amber-400">Ending contest...</p>
+        ) : null}
+        {error ? <p className="mt-2 text-sm text-red-400">{error}</p> : null}
+      </div>
+
+      <div className="grid min-h-[calc(100vh-220px)] grid-cols-1 gap-3 xl:grid-cols-[minmax(360px,44%)_minmax(500px,56%)]">
+        <section className="flex min-h-[640px] flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] shadow-[var(--shadow-md)]">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
+            <h2 className="text-base font-semibold text-[var(--text)]">Problem</h2>
+            {Array.isArray(contest?.problems) && contest.problems.length > 1 ? (
+              <select
+                className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--text)]"
+                value={selectedProblemId}
+                onChange={(event) => setSelectedProblemId(event.target.value)}
+              >
+                {contest.problems.map((problem, index) => (
+                  <option key={problem._id} value={problem._id}>
+                    {index + 1}. {problem.title}
+                  </option>
+                ))}
+              </select>
+            ) : null}
+          </div>
+
+          <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2">
+            {[
+              ["description", "Description"],
+              ["examples", "Examples"],
+              ["constraints", "Constraints"],
+            ].map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setProblemTab(id)}
+                className={`rounded-md border px-3 py-1.5 text-sm transition-all ${
+                  problemTab === id
+                    ? "border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)]"
+                    : "border-transparent text-[var(--text-muted)] hover:border-[var(--border)] hover:text-[var(--text)]"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-4">
+            {contestLoading ? (
+              <p className="text-sm text-[var(--text-muted)]">Loading problem...</p>
+            ) : !selectedProblem ? (
+              <p className="text-sm text-[var(--text-muted)]">No problem mapped to this contest.</p>
+            ) : (
+              <div>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h3 className="text-2xl font-semibold tracking-tight text-[var(--text)]">
+                    {selectedProblem.title}
+                  </h3>
+                  <span className="rounded-full border border-[var(--border)] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]">
+                    {selectedProblem.difficulty}
+                  </span>
                 </div>
 
-                <p className="body-muted whitespace-pre-wrap text-sm sm:text-base">
-                  {selectedProblem.description}
-                </p>
-
-                {selectedProblem.inputFormat ? (
-                  <div>
-                    <h4 className="text-sm font-semibold">Input format</h4>
-                    <p className="body-muted mt-1 whitespace-pre-wrap text-sm">
-                      {selectedProblem.inputFormat}
+                {problemTab === "description" ? (
+                  <div className="space-y-6">
+                    <p className="whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-muted)]">
+                      {selectedProblem.description}
                     </p>
+                    {selectedProblem.inputFormat ? (
+                      <div>
+                        <h4 className="mb-2 text-sm font-semibold text-[var(--text)]">Input format</h4>
+                        <p className="whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-muted)]">
+                          {selectedProblem.inputFormat}
+                        </p>
+                      </div>
+                    ) : null}
+                    {selectedProblem.outputFormat ? (
+                      <div>
+                        <h4 className="mb-2 text-sm font-semibold text-[var(--text)]">
+                          Output format
+                        </h4>
+                        <p className="whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-muted)]">
+                          {selectedProblem.outputFormat}
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
 
-                {selectedProblem.outputFormat ? (
-                  <div>
-                    <h4 className="text-sm font-semibold">Output format</h4>
-                    <p className="body-muted mt-1 whitespace-pre-wrap text-sm">
-                      {selectedProblem.outputFormat}
-                    </p>
-                  </div>
-                ) : null}
-
-                {selectedProblem.constraints ? (
-                  <div>
-                    <h4 className="text-sm font-semibold">Constraints</h4>
-                    <p className="body-muted mt-1 whitespace-pre-wrap text-sm">
-                      {selectedProblem.constraints}
-                    </p>
-                  </div>
-                ) : null}
-
-                {Array.isArray(selectedProblem.exampleTestcases) &&
-                selectedProblem.exampleTestcases.length > 0 ? (
-                  <div>
-                    <h4 className="text-sm font-semibold">Examples</h4>
-                    <div className="mt-2 space-y-2">
-                      {selectedProblem.exampleTestcases.map((example, index) => (
+                {problemTab === "examples" ? (
+                  <div className="space-y-3">
+                    {Array.isArray(selectedProblem.exampleTestcases) &&
+                    selectedProblem.exampleTestcases.length > 0 ? (
+                      selectedProblem.exampleTestcases.map((example, index) => (
                         <div
                           key={`${selectedProblem._id}-example-${index}`}
-                          className="rounded-lg border border-[var(--border)] bg-[var(--surface-soft)] p-3 text-sm"
+                          className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3"
                         >
-                          <p>
+                          <h4 className="mb-2 text-sm font-semibold text-[var(--text)]">
+                            Example {index + 1}
+                          </h4>
+                          <p className="whitespace-pre-wrap text-sm text-[var(--text-muted)]">
                             <strong>Input:</strong> {example.input}
                           </p>
-                          <p className="mt-1">
+                          <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--text-muted)]">
                             <strong>Output:</strong> {example.output}
                           </p>
+                          {example.explanation ? (
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--text-muted)]">
+                              <strong>Explanation:</strong> {example.explanation}
+                            </p>
+                          ) : null}
                         </div>
-                      ))}
-                    </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-[var(--text-muted)]">No examples available.</p>
+                    )}
                   </div>
+                ) : null}
+
+                {problemTab === "constraints" ? (
+                  <p className="whitespace-pre-wrap text-[15px] leading-7 text-[var(--text-muted)]">
+                    {selectedProblem.constraints || "No constraints available."}
+                  </p>
                 ) : null}
               </div>
             )}
-          </SurfaceCard>
+          </div>
+        </section>
 
-          <SurfaceCard className="min-h-[560px] p-6 sm:p-7">
-            <h2 className="text-lg font-semibold">Run & Cases</h2>
-            <p className="body-muted mt-2 text-sm">
-              Test with custom input before final submit integration.
-            </p>
-
-            <label className="mt-4 block text-sm">
-              <span className="mb-2 block text-[var(--text-muted)]">Custom input</span>
-              <textarea
-                className="input min-h-40"
-                value={customInput}
-                onChange={(event) => setCustomInput(event.target.value)}
-                placeholder="Paste input here"
-              />
-            </label>
-
-            <div className="mt-4 flex gap-2">
-              <button onClick={handleRunCode} className="btn btn-primary flex-1 cursor-pointer">
-                Run
-              </button>
-              <button
-                onClick={handleResetRunner}
-                className="btn btn-secondary flex-1 cursor-pointer"
-              >
-                Reset
-              </button>
-            </div>
-
-            {runStatus ? <p className="status status-info mt-4">{runStatus}</p> : null}
-
-            <label className="mt-3 block text-sm">
-              <span className="mb-2 block text-[var(--text-muted)]">Output</span>
-              <textarea
-                className="input min-h-40"
-                readOnly
-                value={runOutput}
-                placeholder="Run output appears here"
-              />
-            </label>
-          </SurfaceCard>
-
-          <SurfaceCard className="min-h-[560px] p-6 sm:p-7">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-lg font-semibold">Editor</h2>
+        <section className="grid min-h-[640px] grid-rows-[minmax(320px,58%)_minmax(250px,42%)_auto] gap-3">
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] shadow-[var(--shadow-md)]">
+            <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
+              <h2 className="text-base font-semibold text-[var(--text)]">Code Editor</h2>
               <select
-                className="input !w-32"
+                className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5 text-sm text-[var(--text)]"
                 value={language}
                 onChange={(event) => setLanguage(event.target.value)}
               >
@@ -479,39 +530,136 @@ const ArenaClient = ({ roomCode }) => {
               </select>
             </div>
 
-            <textarea
-              className="input mt-4 min-h-[400px] font-mono text-sm"
-              value={code}
-              onChange={(event) => setCode(event.target.value)}
-            />
+            <div className="h-full min-h-[220px]">
+              <MonacoEditor
+                height="100%"
+                language={LANGUAGE_TO_MONACO[language]}
+                theme={resolvedTheme === "light" ? "vs" : "vs-dark"}
+                value={activeCode}
+                onChange={(value) =>
+                  setCodeByLanguage((prev) => ({
+                    ...prev,
+                    [language]: value ?? "",
+                  }))
+                }
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 14,
+                  lineHeight: 22,
+                  smoothScrolling: true,
+                  automaticLayout: true,
+                  scrollBeyondLastLine: false,
+                  wordWrap: "on",
+                  tabSize: 2,
+                }}
+              />
+            </div>
+          </div>
 
-            <div className="soft-divider mt-5" />
-
-            <div className="mt-5 space-y-3">
-              <button
-                onClick={handleLeaveArena}
-                disabled={leaving}
-                className="btn btn-danger w-full cursor-pointer py-3"
-              >
-                {leaving ? "Leaving..." : "Leave Arena"}
-              </button>
-
-              {isHost ? (
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] shadow-[var(--shadow-md)]">
+            <div className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2">
+              {[
+                ["testcase", "Testcase"],
+                ["result", "Result"],
+              ].map(([id, label]) => (
                 <button
-                  onClick={handleCloseRoom}
-                  disabled={closing}
-                  className="btn btn-secondary w-full cursor-pointer py-3"
+                  key={id}
+                  onClick={() => setConsoleTab(id)}
+                  className={`rounded-md border px-3 py-1.5 text-sm transition-all ${
+                    consoleTab === id
+                      ? "border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text)]"
+                      : "border-transparent text-[var(--text-muted)] hover:border-[var(--border)] hover:text-[var(--text)]"
+                  }`}
                 >
-                  {closing ? "Closing..." : "Close Room"}
+                  {label}
                 </button>
+              ))}
+            </div>
+
+            <div className="flex-1 overflow-auto px-4 py-3">
+              {consoleTab === "testcase" ? (
+                <>
+                  <label
+                    className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]"
+                    htmlFor="custom-input"
+                  >
+                    Custom Input
+                  </label>
+                  <textarea
+                    id="custom-input"
+                    className="min-h-[150px] w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm text-[var(--text)] outline-none transition focus:border-[var(--border-strong)]"
+                    value={customInput}
+                    onChange={(event) => setCustomInput(event.target.value)}
+                    placeholder="Paste input here"
+                  />
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={handleRunCode}
+                      className="rounded-xl bg-emerald-500 px-5 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400"
+                    >
+                      Run
+                    </button>
+                    <button
+                      onClick={handleResetRunner}
+                      className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-2 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--border-strong)]"
+                    >
+                      Reset
+                    </button>
+                    <button
+                      disabled
+                      className="cursor-not-allowed rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-2 text-sm font-semibold text-[var(--text-muted)]"
+                    >
+                      Submit (Soon)
+                    </button>
+                  </div>
+                </>
               ) : (
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-soft)] px-3 py-2.5 text-sm text-[var(--text-muted)]">
-                  Only host can close room.
-                </div>
+                <>
+                  <label
+                    className="mb-2 block text-xs font-semibold uppercase tracking-[0.08em] text-[var(--text-muted)]"
+                    htmlFor="run-output"
+                  >
+                    Output
+                  </label>
+                  <textarea
+                    id="run-output"
+                    readOnly
+                    className="min-h-[170px] w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-sm text-[var(--text)] outline-none"
+                    value={runOutput}
+                    placeholder="Run output appears here"
+                  />
+                  {runStatus ? (
+                    <p className="mt-2 text-sm text-[var(--text-muted)]">{runStatus}</p>
+                  ) : null}
+                </>
               )}
             </div>
-          </SurfaceCard>
-        </div>
+          </div>
+
+          <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-strong)] p-3 shadow-[var(--shadow-md)]">
+            <button
+              onClick={handleLeaveArena}
+              disabled={leaving}
+              className="mb-2 w-full rounded-xl border border-red-400/30 bg-red-500/15 px-4 py-2.5 text-sm font-semibold text-red-300 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {leaving ? "Leaving..." : "Leave Arena"}
+            </button>
+
+            {isHost ? (
+              <button
+                onClick={handleCloseRoom}
+                disabled={closing}
+                className="w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-sm font-semibold text-[var(--text)] transition hover:border-[var(--border-strong)] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {closing ? "Closing..." : "Close Room"}
+              </button>
+            ) : (
+              <p className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--text-muted)]">
+                Only host can close room.
+              </p>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
