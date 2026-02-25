@@ -12,6 +12,10 @@ import {
 } from "../services/judge/constants.js";
 import { enqueueJudgeJob } from "../services/judge/queue.js";
 import { validateCodePolicy } from "../services/judge/codePolicy.js";
+import {
+  finalizeContestRoomResults,
+  resolveRoomStandings,
+} from "../services/contest/results.js";
 
 const ROOM_TTL_SECONDS = 60 * 60 * 6;
 const CONTEST_COUNTDOWN_MS = 3000;
@@ -514,16 +518,25 @@ const endContestRoom = async ({
   const roomMeta = await getRoomMetaOrHydrate(redis, roomCode);
   if (!roomMeta || roomMeta.status !== "running") return false;
 
-  await setContestRoomStatus({
+  const endedRoom = await setContestRoomStatus({
     roomCode,
     status: "ended",
     contestEndAt: Date.now(),
   });
+  const finalizedRoom = await finalizeContestRoomResults({
+    roomCode,
+    roomDoc: endedRoom,
+  });
+  const finalStandings = resolveRoomStandings(finalizedRoom || endedRoom || {});
 
   const members = await getRoomMembers(redis, roomCode);
   io.to(roomCode).emit("contest-ended", {
     roomCode,
     message,
+    status: "ended",
+    resultsReady: true,
+    resultsPath: `/results?room=${roomCode}`,
+    finalStandings,
   });
   io.in(roomCode).socketsLeave(roomCode);
 
@@ -1216,6 +1229,22 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
+        if (
+          roomMeta.status === "running" &&
+          typeof roomMeta.contestEndAt === "number" &&
+          roomMeta.contestEndAt <= Date.now()
+        ) {
+          await endContestRoom({
+            io,
+            redis,
+            roomCode,
+            message: "Contest time completed",
+          });
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest already ended"))
+            : undefined;
+        }
+
         if (roomMeta.status !== "running") {
           return typeof ack === "function"
             ? ack(fail("BAD_STATE", "Contest is not running"))
@@ -1360,6 +1389,22 @@ export const initSocket = (io, redis) => {
         if (!roomMeta) {
           return typeof ack === "function"
             ? ack(fail("NOT_FOUND", "Room not found"))
+            : undefined;
+        }
+
+        if (
+          roomMeta.status === "running" &&
+          typeof roomMeta.contestEndAt === "number" &&
+          roomMeta.contestEndAt <= Date.now()
+        ) {
+          await endContestRoom({
+            io,
+            redis,
+            roomCode,
+            message: "Contest time completed",
+          });
+          return typeof ack === "function"
+            ? ack(fail("BAD_STATE", "Contest already ended"))
             : undefined;
         }
 
@@ -1553,16 +1598,29 @@ export const initSocket = (io, redis) => {
             : undefined;
         }
 
-        await setContestRoomStatus({
+        const closedRoom = await setContestRoomStatus({
           roomCode,
           status: "closed",
         });
+        const hadStartedContest =
+          roomMeta.status === "running" ||
+          typeof roomMeta.contestStartAt === "number";
+        if (hadStartedContest) {
+          await finalizeContestRoomResults({
+            roomCode,
+            roomDoc: closedRoom,
+          });
+        }
         clearContestEndTimer(roomCode);
 
         const members = await getRoomMembers(redis, roomCode);
         io.to(roomCode).emit("room-closed", {
           roomCode,
           message: "Room closed by host",
+          resultsReady:
+            roomMeta.status === "running" ||
+            typeof roomMeta.contestStartAt === "number",
+          resultsPath: `/results?room=${roomCode}`,
         });
         io.in(roomCode).socketsLeave(roomCode);
 

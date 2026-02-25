@@ -545,13 +545,17 @@ const ArenaClient = ({ roomCode }) => {
     const handleRoomClosed = async (payload = {}) => {
       if (payload.roomCode !== roomCode) return;
       await refreshActiveRoom();
-      router.push("/dashboard");
+      if (payload.resultsReady === false) {
+        router.replace("/dashboard");
+        return;
+      }
+      router.replace(payload.resultsPath || `/results?room=${roomCode}`);
     };
 
     const handleContestEnded = async (payload = {}) => {
       if (payload.roomCode !== roomCode) return;
       await refreshActiveRoom();
-      router.push("/dashboard");
+      router.replace(payload.resultsPath || `/results?room=${roomCode}`);
     };
 
     const handleRoomMembersUpdated = (payload = {}) => {
@@ -673,7 +677,7 @@ const ArenaClient = ({ roomCode }) => {
         setError(ack?.message || "Could not enter arena");
         if (["NOT_FOUND", "BAD_STATE", "FORBIDDEN"].includes(ack?.code)) {
           await refreshActiveRoom();
-          router.replace("/dashboard");
+          router.replace(`/results?room=${roomCode}`);
         }
         return;
       }
@@ -864,7 +868,7 @@ const ArenaClient = ({ roomCode }) => {
       }
 
       await refreshActiveRoom();
-      router.push("/dashboard");
+      router.push(`/results?room=${roomCode}`);
     });
   };
 

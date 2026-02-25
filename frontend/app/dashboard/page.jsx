@@ -1,5 +1,5 @@
 "use client";
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import SurfaceCard from "../components/ui/SurfaceCard";
@@ -7,6 +7,12 @@ import PageHeader from "../components/ui/PageHeader";
 import StatusMessage from "../components/ui/StatusMessage";
 import { useUser } from "../utils/UserContext";
 import { useSocket } from "../utils/SocketProvider";
+import { API_BASE_URL } from "../utils/config";
+
+const formatFinishedAt = (timestamp) => {
+  if (!Number.isFinite(Number(timestamp))) return "--";
+  return new Date(Number(timestamp)).toLocaleString();
+};
 
 const Dashboard = () => {
   const { user, activeRoom, refreshActiveRoom } = useUser();
@@ -14,13 +20,47 @@ const Dashboard = () => {
   const router = useRouter();
   const [resumeLoading, setResumeLoading] = useState(false);
   const [resumeError, setResumeError] = useState("");
+  const [recentFinished, setRecentFinished] = useState([]);
+  const [recentFinishedLoading, setRecentFinishedLoading] = useState(false);
+  const [recentFinishedError, setRecentFinishedError] = useState("");
 
-  if (!user) return null;
-
-  const isAdmin = user.role === "admin";
+  const isAdmin = user?.role === "admin";
   const hasRunningContest = activeRoom?.status === "running" && activeRoom?.roomCode;
   const hasLobbyRoom = activeRoom?.status === "lobby" && activeRoom?.roomCode;
   const hasAnyActiveRoom = Boolean(hasRunningContest || hasLobbyRoom);
+
+  const fetchRecentFinishedContests = useCallback(async () => {
+    if (!user?._id) return;
+
+    setRecentFinishedLoading(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/contest/recent-finished?limit=6`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      const data = await res.json();
+
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.message || "Could not load recent finished contests");
+      }
+
+      setRecentFinishedError("");
+      setRecentFinished(Array.isArray(data.entries) ? data.entries : []);
+    } catch (err) {
+      setRecentFinished([]);
+      setRecentFinishedError(
+        err?.message || "Could not load recent finished contests"
+      );
+    } finally {
+      setRecentFinishedLoading(false);
+    }
+  }, [user?._id]);
+
+  useEffect(() => {
+    void fetchRecentFinishedContests();
+  }, [fetchRecentFinishedContests]);
+
+  if (!user) return null;
 
   const handleResume = () => {
     if (!activeRoom?.roomCode) return;
@@ -103,6 +143,67 @@ const Dashboard = () => {
               </p>
             </div>
           )}
+
+          <div className="soft-divider mt-6" />
+
+          <div className="mt-5">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <h3 className="text-base font-semibold">Recent Finished Contests</h3>
+              <button
+                onClick={() => void fetchRecentFinishedContests()}
+                disabled={recentFinishedLoading}
+                className="btn btn-secondary cursor-pointer px-3 py-1.5 text-xs"
+              >
+                {recentFinishedLoading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
+
+            {recentFinishedLoading && recentFinished.length === 0 ? (
+              <StatusMessage variant="info" role="status">
+                Loading recent finished contests...
+              </StatusMessage>
+            ) : recentFinishedError ? (
+              <StatusMessage variant="error" role="alert">
+                {recentFinishedError}
+              </StatusMessage>
+            ) : recentFinished.length === 0 ? (
+              <StatusMessage variant="info" role="status">
+                No recently finished contests yet.
+              </StatusMessage>
+            ) : (
+              <ul className="space-y-2.5">
+                {recentFinished.map((entry) => (
+                  <li
+                    key={entry.roomCode}
+                    className="rounded-lg border border-[var(--border)] bg-[var(--surface-soft)] px-3 py-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-medium">{entry.contestTitle || "Contest"}</p>
+                        <p className="body-muted mt-1 text-xs">
+                          Room {entry.roomCode} | Finished{" "}
+                          {formatFinishedAt(entry.finalizedAt)}
+                        </p>
+                        {entry.userStanding ? (
+                          <p className="body-muted mt-1 text-xs">
+                            Rank #{entry.userStanding.rank || "-"} | Score{" "}
+                            {entry.userStanding.score || 0} | Penalty{" "}
+                            {entry.userStanding.penalty || 0}
+                          </p>
+                        ) : null}
+                      </div>
+                      <Link
+                        href={entry.resultsPath || `/results?room=${entry.roomCode}`}
+                        className="btn btn-primary h-9 px-3 text-sm"
+                      >
+                        View Results
+                      </Link>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </SurfaceCard>
 
         <SurfaceCard className="p-6 sm:p-7">

@@ -5,6 +5,10 @@ import ContestRoom from "../models/ContestRoom.js";
 import Problem from "../models/Problem.js";
 import Submission from "../models/Submission.js";
 import { authorizeRoles, requireAuth } from "../middlewares/auth.js";
+import {
+  finalizeContestRoomResults,
+  resolveRoomStandings,
+} from "../services/contest/results.js";
 
 const ACTIVE_ROOM_STATUSES = ["lobby", "running"];
 const ACTIVE_PARTICIPANT_STATES = ["active", "disconnected"];
@@ -38,6 +42,39 @@ const toMillis = (value) => {
 };
 
 const isActiveRoomStatus = (status) => ACTIVE_ROOM_STATUSES.includes(status);
+
+const normalizeBoolean = (value) => value === true;
+
+const toStandingsMember = (standing = {}) => ({
+  rank: Number.isFinite(Number(standing.rank)) ? Number(standing.rank) : null,
+  userId: String(standing.userId || ""),
+  username: String(standing.username || ""),
+  state: String(standing.state || "active"),
+  ready: normalizeBoolean(standing.ready),
+  score: Number.isFinite(Number(standing.score)) ? Number(standing.score) : 0,
+  penalty: Number.isFinite(Number(standing.penalty)) ? Number(standing.penalty) : 0,
+  solvedCount: Number.isFinite(Number(standing.solvedCount))
+    ? Number(standing.solvedCount)
+    : 0,
+  solvedProblemIds: Array.isArray(standing.solvedProblemIds)
+    ? standing.solvedProblemIds.map((item) => String(item))
+    : [],
+  joinedAt: Number.isFinite(Number(standing.joinedAt))
+    ? Number(standing.joinedAt)
+    : toMillis(standing.joinedAt),
+  lastSeenAt: Number.isFinite(Number(standing.lastSeenAt))
+    ? Number(standing.lastSeenAt)
+    : toMillis(standing.lastSeenAt),
+});
+
+const acceptedVerdictExpression = {
+  $and: [
+    { $eq: ["$status", "done"] },
+    { $eq: ["$verdict", "Accepted"] },
+    { $gt: ["$testcasesTotal", 0] },
+    { $eq: ["$testcasesPassed", "$testcasesTotal"] },
+  ],
+};
 
 const getAuthorizedRoomForUser = async ({
   roomCode,
@@ -96,6 +133,10 @@ const reconcileExpiredRunningRoom = async (room) => {
       },
     }
   );
+
+  await finalizeContestRoomResults({
+    roomCode: room.roomCode,
+  });
 
   return {
     ...room,
@@ -171,6 +212,123 @@ contestRouter.get("/active", requireAuth, async (req, res) => {
     console.error("active contest error:", error.message);
     return res.status(500).json({
       message: "Could not load active contest",
+    });
+  }
+});
+
+contestRouter.get("/recent-finished", requireAuth, async (req, res) => {
+  try {
+    const userId = String(req.user._id);
+    const rawLimit = Number(req.query.limit);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(20, Math.floor(rawLimit)))
+      : 8;
+
+    const query = {
+      status: { $in: ["ended", "closed"] },
+      contestStartAt: { $ne: null },
+      $or: [
+        { hostUserId: userId },
+        {
+          participants: {
+            $elemMatch: {
+              userId,
+            },
+          },
+        },
+      ],
+    };
+
+    const selectFields =
+      "_id roomCode contestId status hostUserId hostName contestStartAt contestEndAt finalStandings finalizedAt participants updatedAt";
+
+    let rooms = await ContestRoom.find(query)
+      .sort({ finalizedAt: -1, updatedAt: -1 })
+      .limit(limit)
+      .select(selectFields)
+      .lean();
+
+    const needsFinalization = rooms.filter(
+      (room) =>
+        !room.finalizedAt ||
+        !Array.isArray(room.finalStandings) ||
+        room.finalStandings.length === 0
+    );
+
+    if (needsFinalization.length > 0) {
+      for (const room of needsFinalization) {
+        // eslint-disable-next-line no-await-in-loop
+        await finalizeContestRoomResults({ roomCode: room.roomCode });
+      }
+
+      rooms = await ContestRoom.find(query)
+        .sort({ finalizedAt: -1, updatedAt: -1 })
+        .limit(limit)
+        .select(selectFields)
+        .lean();
+    }
+
+    const contestIds = Array.from(
+      new Set(
+        rooms
+          .map((room) => (room.contestId ? String(room.contestId) : ""))
+          .filter((value) => mongoose.Types.ObjectId.isValid(value))
+      )
+    );
+
+    const contests = await Contest.find({ _id: { $in: contestIds } })
+      .select("title duration")
+      .lean();
+    const contestById = new Map(
+      contests.map((contest) => [String(contest._id), contest])
+    );
+
+    const entries = rooms.map((room) => {
+      const standings = resolveRoomStandings(room).map(toStandingsMember);
+      const userStanding =
+        standings.find((standing) => standing.userId === userId) || null;
+      const contestId = room.contestId ? String(room.contestId) : null;
+      const contest = contestId ? contestById.get(contestId) : null;
+
+      return {
+        roomCode: room.roomCode,
+        status: room.status,
+        hostUserId: room.hostUserId,
+        hostName: room.hostName,
+        isHost: room.hostUserId === userId,
+        contestId,
+        contestTitle: contest?.title
+          ? String(contest.title)
+          : `Room ${room.roomCode} Contest`,
+        duration: Number.isFinite(Number(contest?.duration))
+          ? Number(contest.duration)
+          : null,
+        contestStartAt: toMillis(room.contestStartAt),
+        contestEndAt: toMillis(room.contestEndAt),
+        finalizedAt: toMillis(room.finalizedAt) || toMillis(room.contestEndAt),
+        participantCount: standings.length,
+        userStanding: userStanding
+          ? {
+              rank: userStanding.rank,
+              score: userStanding.score,
+              penalty: userStanding.penalty,
+              solvedCount: userStanding.solvedCount,
+            }
+          : null,
+        resultsPath: `/results?room=${room.roomCode}`,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      count: entries.length,
+      entries,
+    });
+  } catch (error) {
+    console.error("recent finished contests error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Could not load recent finished contests",
     });
   }
 });
@@ -497,7 +655,8 @@ contestRouter.get("/rooms/:roomCode/leaderboard", requireAuth, async (req, res) 
     const room = await getAuthorizedRoomForUser({
       roomCode,
       userId,
-      select: "roomCode contestId status hostUserId hostName participants",
+      select:
+        "roomCode contestId status hostUserId hostName contestStartAt participants finalStandings finalizedAt",
     });
 
     if (!room) {
@@ -507,41 +666,41 @@ contestRouter.get("/rooms/:roomCode/leaderboard", requireAuth, async (req, res) 
       });
     }
 
-    const members = (Array.isArray(room.participants) ? room.participants : [])
-      .map((participant) => ({
-        userId: participant.userId,
-        username: participant.username,
-        state: participant.state || "active",
-        ready: participant.ready === true,
-        score: Number.isFinite(Number(participant.score)) ? Number(participant.score) : 0,
-        penalty: Number.isFinite(Number(participant.penalty))
-          ? Number(participant.penalty)
-          : 0,
-        solvedCount: Number.isFinite(Number(participant.solvedCount))
-          ? Number(participant.solvedCount)
-          : 0,
-        solvedProblemIds: Array.isArray(participant.solvedProblemIds)
-          ? participant.solvedProblemIds.map((item) => String(item))
-          : [],
-        joinedAt: participant.joinedAt ? new Date(participant.joinedAt).getTime() : null,
-        lastSeenAt: participant.lastSeenAt
-          ? new Date(participant.lastSeenAt).getTime()
-          : null,
-      }))
-      .sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
-        if (a.penalty !== b.penalty) return a.penalty - b.penalty;
-        return String(a.username || "").localeCompare(String(b.username || ""));
+    let resolvedRoom = room;
+    const canFinalizeLeaderboard =
+      String(room.status || "") === "ended" ||
+      (String(room.status || "") === "closed" &&
+        Number.isFinite(toMillis(room.contestStartAt)));
+
+    if (
+      canFinalizeLeaderboard &&
+      (!room.finalizedAt ||
+        !Array.isArray(room.finalStandings) ||
+        room.finalStandings.length === 0)
+    ) {
+      await finalizeContestRoomResults({ roomCode });
+      const refreshedRoom = await getAuthorizedRoomForUser({
+        roomCode,
+        userId,
+        select:
+          "roomCode contestId status hostUserId hostName contestStartAt participants finalStandings finalizedAt",
       });
+      if (refreshedRoom) {
+        resolvedRoom = refreshedRoom;
+      }
+    }
+
+    const members = resolveRoomStandings(resolvedRoom).map(toStandingsMember);
 
     return res.status(200).json({
       success: true,
       room: {
-        roomCode: room.roomCode,
-        status: room.status,
-        hostUserId: room.hostUserId,
-        hostName: room.hostName,
-        contestId: room.contestId ? String(room.contestId) : null,
+        roomCode: resolvedRoom.roomCode,
+        status: resolvedRoom.status,
+        hostUserId: resolvedRoom.hostUserId,
+        hostName: resolvedRoom.hostName,
+        contestId: resolvedRoom.contestId ? String(resolvedRoom.contestId) : null,
+        finalizedAt: resolvedRoom.finalizedAt ? toMillis(resolvedRoom.finalizedAt) : null,
       },
       members,
       updatedAt: Date.now(),
@@ -651,6 +810,250 @@ contestRouter.get("/rooms/:roomCode/submissions", requireAuth, async (req, res) 
     });
   } catch (error) {
     console.error("get room submissions error:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+contestRouter.get("/rooms/:roomCode/results", requireAuth, async (req, res) => {
+  try {
+    const roomCode = normalizeRoomCode(req.params.roomCode);
+    if (!roomCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Room code is required",
+      });
+    }
+
+    const userId = String(req.user._id);
+    const selectFields =
+      "_id roomCode contestId status hostUserId hostName contestStartAt contestEndAt participants finalStandings finalizedAt";
+
+    let room = await getAuthorizedRoomForUser({
+      roomCode,
+      userId,
+      select: selectFields,
+    });
+
+    if (!room) {
+      return res.status(404).json({
+        success: false,
+        message: "Room not found",
+      });
+    }
+
+    const roomStatus = String(room.status || "");
+    const contestStarted = Number.isFinite(toMillis(room.contestStartAt));
+    const canShowResults =
+      roomStatus === "ended" || (roomStatus === "closed" && contestStarted);
+    if (!canShowResults) {
+      return res.status(409).json({
+        success: false,
+        code: "CONTEST_NOT_FINISHED",
+        message: "Contest is not finished yet",
+        room: {
+          roomCode: room.roomCode,
+          status: roomStatus,
+          contestId: room.contestId ? String(room.contestId) : null,
+          contestStartAt: toMillis(room.contestStartAt),
+          contestEndAt: toMillis(room.contestEndAt),
+        },
+      });
+    }
+
+    const hasFinalSnapshot =
+      room.finalizedAt &&
+      Array.isArray(room.finalStandings) &&
+      room.finalStandings.length > 0;
+
+    if (!hasFinalSnapshot) {
+      await finalizeContestRoomResults({ roomCode });
+      room = await getAuthorizedRoomForUser({
+        roomCode,
+        userId,
+        select: selectFields,
+      });
+      if (!room) {
+        return res.status(404).json({
+          success: false,
+          message: "Room not found",
+        });
+      }
+    }
+
+    const standings = resolveRoomStandings(room).map(toStandingsMember);
+
+    let contestProblems = [];
+    if (room.contestId && mongoose.Types.ObjectId.isValid(String(room.contestId))) {
+      const contestDoc = await Contest.findById(room.contestId)
+        .select("problems")
+        .lean();
+      const contestProblemIds = Array.isArray(contestDoc?.problems)
+        ? contestDoc.problems.map((item) => String(item))
+        : [];
+
+      if (contestProblemIds.length > 0) {
+        const problemDocs = await Problem.find({
+          _id: { $in: contestProblemIds },
+        })
+          .select("_id title slug difficulty")
+          .lean();
+        const problemById = new Map(
+          problemDocs.map((problem) => [String(problem._id), problem])
+        );
+
+        contestProblems = contestProblemIds
+          .map((problemId) => {
+            const problem = problemById.get(problemId);
+            if (!problem) return null;
+            return {
+              _id: problemId,
+              title: String(problem.title || ""),
+              slug: String(problem.slug || ""),
+              difficulty: String(problem.difficulty || ""),
+            };
+          })
+          .filter(Boolean);
+      }
+    }
+
+    const submissionSummaryRows = await Submission.aggregate([
+      {
+        $match: {
+          roomCode,
+          submissionType: "submit",
+        },
+      },
+      {
+        $group: {
+          _id: "$userId",
+          username: { $max: "$username" },
+          totalSubmissions: { $sum: 1 },
+          acceptedSubmissions: {
+            $sum: { $cond: [acceptedVerdictExpression, 1, 0] },
+          },
+          failedSubmissions: {
+            $sum: {
+              $cond: [{ $not: [acceptedVerdictExpression] }, 1, 0],
+            },
+          },
+          totalScoreDelta: { $sum: { $ifNull: ["$scoreDelta", 0] } },
+          totalPenaltyDelta: { $sum: { $ifNull: ["$penaltyDelta", 0] } },
+          lastSubmissionAt: { $max: "$createdAt" },
+        },
+      },
+    ]);
+
+    const perProblemRows = await Submission.aggregate([
+      {
+        $match: {
+          roomCode,
+          submissionType: "submit",
+        },
+      },
+      {
+        $group: {
+          _id: {
+            userId: "$userId",
+            problemId: "$problemId",
+          },
+          attempts: { $sum: 1 },
+          accepted: {
+            $max: {
+              $cond: [acceptedVerdictExpression, 1, 0],
+            },
+          },
+        },
+      },
+    ]);
+
+    const summaryByUserId = new Map(
+      submissionSummaryRows.map((row) => [
+        String(row._id || ""),
+        {
+          username: String(row.username || ""),
+          totalSubmissions: Number.isFinite(Number(row.totalSubmissions))
+            ? Number(row.totalSubmissions)
+            : 0,
+          acceptedSubmissions: Number.isFinite(Number(row.acceptedSubmissions))
+            ? Number(row.acceptedSubmissions)
+            : 0,
+          failedSubmissions: Number.isFinite(Number(row.failedSubmissions))
+            ? Number(row.failedSubmissions)
+            : 0,
+          totalScoreDelta: Number.isFinite(Number(row.totalScoreDelta))
+            ? Number(row.totalScoreDelta)
+            : 0,
+          totalPenaltyDelta: Number.isFinite(Number(row.totalPenaltyDelta))
+            ? Number(row.totalPenaltyDelta)
+            : 0,
+          lastSubmissionAt: row.lastSubmissionAt ? toMillis(row.lastSubmissionAt) : null,
+        },
+      ])
+    );
+
+    const problemSummaryByUserId = new Map();
+    for (const row of perProblemRows) {
+      const entryUserId = String(row?._id?.userId || "");
+      const entryProblemId = String(row?._id?.problemId || "");
+      if (!entryUserId || !entryProblemId) continue;
+
+      if (!problemSummaryByUserId.has(entryUserId)) {
+        problemSummaryByUserId.set(entryUserId, []);
+      }
+
+      problemSummaryByUserId.get(entryUserId).push({
+        problemId: entryProblemId,
+        attempts: Number.isFinite(Number(row.attempts)) ? Number(row.attempts) : 0,
+        accepted: Number(row.accepted) > 0,
+      });
+    }
+
+    const submissionSummary = standings.map((standing) => {
+      const userSummary = summaryByUserId.get(standing.userId) || null;
+      const byProblem = (problemSummaryByUserId.get(standing.userId) || []).sort(
+        (a, b) => {
+          if (a.accepted !== b.accepted) return Number(b.accepted) - Number(a.accepted);
+          if (b.attempts !== a.attempts) return b.attempts - a.attempts;
+          return a.problemId.localeCompare(b.problemId);
+        }
+      );
+
+      return {
+        userId: standing.userId,
+        username: standing.username || userSummary?.username || "",
+        totalSubmissions: userSummary?.totalSubmissions || 0,
+        acceptedSubmissions: userSummary?.acceptedSubmissions || 0,
+        failedSubmissions: userSummary?.failedSubmissions || 0,
+        totalScoreDelta: userSummary?.totalScoreDelta || 0,
+        totalPenaltyDelta: userSummary?.totalPenaltyDelta || 0,
+        solvedCount: standing.solvedCount,
+        lastSubmissionAt: userSummary?.lastSubmissionAt || null,
+        byProblem,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      room: {
+        roomCode: room.roomCode,
+        status: room.status,
+        contestId: room.contestId ? String(room.contestId) : null,
+        hostUserId: room.hostUserId,
+        hostName: room.hostName,
+        contestStartAt: toMillis(room.contestStartAt),
+        contestEndAt: toMillis(room.contestEndAt),
+        finalizedAt: toMillis(room.finalizedAt),
+      },
+      problems: contestProblems,
+      standings,
+      submissionSummary,
+      generatedAt: Date.now(),
+    });
+  } catch (error) {
+    console.error("get room results error:", error.message);
     return res.status(500).json({
       success: false,
       message: "Internal Server Error",

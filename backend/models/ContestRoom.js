@@ -49,6 +49,60 @@ const participantSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const finalStandingSchema = new mongoose.Schema(
+  {
+    rank: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    userId: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    username: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    ready: {
+      type: Boolean,
+      default: false,
+    },
+    state: {
+      type: String,
+      enum: ["active", "disconnected", "left"],
+      default: "active",
+    },
+    score: {
+      type: Number,
+      default: 0,
+    },
+    penalty: {
+      type: Number,
+      default: 0,
+    },
+    solvedCount: {
+      type: Number,
+      default: 0,
+    },
+    solvedProblemIds: {
+      type: [String],
+      default: [],
+    },
+    joinedAt: {
+      type: Date,
+      default: null,
+    },
+    lastSeenAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
 const contestRoomSchema = new mongoose.Schema(
   {
     roomCode: {
@@ -90,11 +144,20 @@ const contestRoomSchema = new mongoose.Schema(
       type: [participantSchema],
       default: [],
     },
+    finalStandings: {
+      type: [finalStandingSchema],
+      default: [],
+    },
+    finalizedAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
 
 contestRoomSchema.index({ status: 1, updatedAt: -1 });
 contestRoomSchema.index({ "participants.userId": 1, status: 1, updatedAt: -1 });
+contestRoomSchema.index({ status: 1, finalizedAt: -1, updatedAt: -1 });
 
 export default mongoose.model("ContestRoom", contestRoomSchema);
