@@ -31,6 +31,16 @@ const ROOM_STATUS_TO_CONTEST_ACTIVE = {
 const REJOIN_PARTICIPANT_STATES = new Set(["active", "disconnected"]);
 const CACHE_MEMBER_STATES = new Set(["active"]);
 const contestEndTimers = new Map();
+const SOCKET_RATE_LIMITS = {
+  runCode: {
+    limit: 30,
+    windowSeconds: 60,
+  },
+  submitCode: {
+    limit: 12,
+    windowSeconds: 60,
+  },
+};
 
 const ok = (data) => ({ ok: true, data });
 const fail = (code, message) => ({ ok: false, code, message });
@@ -95,6 +105,8 @@ const roomMembersKey = (roomCode) => `room:${roomCode}:members`;
 const roomUserSocketsKey = (roomCode, userId) =>
   `room:${roomCode}:user:${userId}:sockets`;
 const socketRoomsKey = (socketId) => `socket:${socketId}:rooms`;
+const socketRateLimitKey = ({ eventName, userId, roomCode }) =>
+  `ratelimit:socket:${eventName}:user:${userId}:room:${roomCode}`;
 
 const toMember = (socket, ready = false) => ({
   userId: socket.data.user.id,
@@ -173,6 +185,46 @@ const emitRoomMembers = async (io, redis, roomCode) => {
   const allReady = computeAllReady(members);
   io.to(roomCode).emit("room-members-updated", { roomCode, members, allReady });
   return { members, allReady };
+};
+
+const consumeSocketRateLimit = async (
+  redis,
+  { eventName, userId, roomCode, limit, windowSeconds }
+) => {
+  const normalizedLimit = Number.isFinite(Number(limit))
+    ? Math.max(1, Math.floor(Number(limit)))
+    : 10;
+  const normalizedWindowSeconds = Number.isFinite(Number(windowSeconds))
+    ? Math.max(1, Math.floor(Number(windowSeconds)))
+    : 60;
+  const key = socketRateLimitKey({
+    eventName: String(eventName || "event"),
+    userId: String(userId || "unknown"),
+    roomCode: normalizeRoomCode(roomCode || "global"),
+  });
+
+  try {
+    const currentCount = await redis.incr(key);
+    if (currentCount === 1) {
+      await redis.expire(key, normalizedWindowSeconds);
+    }
+
+    const ttl = await redis.ttl(key);
+    return {
+      ok: currentCount <= normalizedLimit,
+      count: currentCount,
+      remaining: Math.max(0, normalizedLimit - currentCount),
+      retryAfterSeconds: ttl > 0 ? ttl : normalizedWindowSeconds,
+    };
+  } catch (error) {
+    console.error("socket rate limiter error:", error.message);
+    return {
+      ok: true,
+      count: 0,
+      remaining: normalizedLimit,
+      retryAfterSeconds: 0,
+    };
+  }
 };
 
 const deleteRoomState = async (redis, roomCode, members) => {
@@ -705,6 +757,8 @@ export const initSocket = (io, redis) => {
       Problem,
       mongoose,
       randomUUID,
+      consumeSocketRateLimit,
+      SOCKET_RATE_LIMITS,
     });
   });
 };

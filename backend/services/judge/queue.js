@@ -309,3 +309,34 @@ export const closeRunCodeQueueResources = async () => {
     queueEventsConnection.quit(),
   ]);
 };
+
+export const getRunCodeQueueHealth = async () => {
+  const connectionStatus = {
+    queue: String(queueConnection.status || "unknown"),
+    events: String(queueEventsConnection.status || "unknown"),
+  };
+
+  try {
+    const counts = await runCodeQueue.getJobCounts(
+      "waiting",
+      "active",
+      "completed",
+      "failed",
+      "delayed",
+      "paused"
+    );
+
+    return {
+      ok: connectionStatus.queue === "ready" && connectionStatus.events === "ready",
+      connectionStatus,
+      counts,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      connectionStatus,
+      counts: null,
+      error: error.message,
+    };
+  }
+};

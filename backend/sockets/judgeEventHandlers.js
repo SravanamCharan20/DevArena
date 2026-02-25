@@ -21,6 +21,8 @@ export const registerJudgeSocketHandlers = ({
   Problem,
   mongoose,
   randomUUID,
+  consumeSocketRateLimit,
+  SOCKET_RATE_LIMITS,
 }) => {
   socket.on("run-code", async (payload = {}, ack) => {
     try {
@@ -28,6 +30,25 @@ export const registerJudgeSocketHandlers = ({
       if (!roomCode) {
         return typeof ack === "function"
           ? ack(fail("BAD_REQUEST", "Room code is required"))
+          : undefined;
+      }
+
+      const runLimit = SOCKET_RATE_LIMITS?.runCode || {};
+      const runRate = await consumeSocketRateLimit(redis, {
+        eventName: "run-code",
+        userId: socket.data.user.id,
+        roomCode,
+        limit: runLimit.limit,
+        windowSeconds: runLimit.windowSeconds,
+      });
+      if (!runRate.ok) {
+        return typeof ack === "function"
+          ? ack(
+              fail(
+                "RATE_LIMITED",
+                `Too many run requests. Retry in ${runRate.retryAfterSeconds}s`
+              )
+            )
           : undefined;
       }
 
@@ -198,6 +219,25 @@ export const registerJudgeSocketHandlers = ({
       if (!roomCode) {
         return typeof ack === "function"
           ? ack(fail("BAD_REQUEST", "Room code is required"))
+          : undefined;
+      }
+
+      const submitLimit = SOCKET_RATE_LIMITS?.submitCode || {};
+      const submitRate = await consumeSocketRateLimit(redis, {
+        eventName: "submit-code",
+        userId: socket.data.user.id,
+        roomCode,
+        limit: submitLimit.limit,
+        windowSeconds: submitLimit.windowSeconds,
+      });
+      if (!submitRate.ok) {
+        return typeof ack === "function"
+          ? ack(
+              fail(
+                "RATE_LIMITED",
+                `Too many submit requests. Retry in ${submitRate.retryAfterSeconds}s`
+              )
+            )
           : undefined;
       }
 

@@ -5,6 +5,7 @@ import { LogOut } from "lucide-react";
 import { useUser } from "../utils/UserContext";
 import ThemeToggle from "./ThemeToggle";
 import { API_BASE_URL } from "../utils/config";
+import { buildCsrfHeaders } from "../utils/csrf";
 
 const Navbar = () => {
   const { user, setUser, loading } = useUser();
@@ -15,6 +16,7 @@ const Navbar = () => {
       await fetch(`${API_BASE_URL}/auth/logout`, {
         method: "POST",
         credentials: "include",
+        headers: buildCsrfHeaders(),
       });
 
       setUser(null);

@@ -7,6 +7,12 @@ import {
   signupIdentityRateLimiter,
   signupIpRateLimiter,
 } from "../middlewares/rateLimit.js";
+import {
+  clearCsrfToken,
+  ensureCsrfCookie,
+  requireCsrf,
+  rotateCsrfToken,
+} from "../middlewares/csrf.js";
 
 const authRouter = express.Router();
 const isProduction = process.env.NODE_ENV === "production";
@@ -113,6 +119,7 @@ authRouter.post(
         ...cookieOptions,
         maxAge: 24 * 60 * 60 * 1000,
       });
+      rotateCsrfToken(res);
 
       return res.status(200).json({
         message: "Welcome back! Logged in successfully 👋",
@@ -127,15 +134,16 @@ authRouter.post(
   }
 );
 
-authRouter.post("/logout", (req, res) => {
+authRouter.post("/logout", requireCsrf, (req, res) => {
   res.clearCookie("token", buildTokenCookieOptions());
+  clearCsrfToken(res);
 
   res.json({
     message: "You’ve been logged out. See you soon!",
   });
 });
 
-authRouter.get("/profile", requireAuth, (req, res) => {
+authRouter.get("/profile", requireAuth, ensureCsrfCookie, (req, res) => {
   res.json({
     message: "Here’s your profile.",
     user: req.user,

@@ -1,14 +1,19 @@
 import express from "express";
 import { authorizeRoles, requireAuth } from "../middlewares/auth.js";
+import { requireCsrf } from "../middlewares/csrf.js";
 import {
   getActiveContest,
   getRecentFinishedContests,
 } from "../controllers/contest/activeController.js";
 import {
+  archiveProblem,
   createProblem,
+  deleteProblem,
   getProblemById,
   getProblemBySlug,
   listProblems,
+  unarchiveProblem,
+  updateProblem,
 } from "../controllers/contest/problemController.js";
 import {
   getContestById,
@@ -25,10 +30,45 @@ contestRouter.get("/active", requireAuth, getActiveContest);
 contestRouter.get("/recent-finished", requireAuth, getRecentFinishedContests);
 
 contestRouter.get("/problems", requireAuth, listProblems);
-contestRouter.post("/problems", requireAuth, authorizeRoles("admin"), createProblem);
+contestRouter.post(
+  "/problems",
+  requireAuth,
+  requireCsrf,
+  authorizeRoles("admin"),
+  createProblem
+);
+contestRouter.patch(
+  "/problems/:id",
+  requireAuth,
+  requireCsrf,
+  authorizeRoles("admin"),
+  updateProblem
+);
+contestRouter.post(
+  "/problems/:id/archive",
+  requireAuth,
+  requireCsrf,
+  authorizeRoles("admin"),
+  archiveProblem
+);
+contestRouter.post(
+  "/problems/:id/unarchive",
+  requireAuth,
+  requireCsrf,
+  authorizeRoles("admin"),
+  unarchiveProblem
+);
+contestRouter.delete(
+  "/problems/:id",
+  requireAuth,
+  requireCsrf,
+  authorizeRoles("admin"),
+  deleteProblem
+);
 contestRouter.post(
   "/create-problem",
   requireAuth,
+  requireCsrf,
   authorizeRoles("admin"),
   createProblem
 );
@@ -42,6 +82,7 @@ contestRouter.get("/rooms/:roomCode/results", requireAuth, getRoomResults);
 contestRouter.post(
   "/rooms/:roomCode/contest",
   requireAuth,
+  requireCsrf,
   authorizeRoles("admin"),
   mapContestToRoom
 );
